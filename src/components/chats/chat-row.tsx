@@ -1,46 +1,50 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { SteamColors } from '@/constants/steam-theme';
-import type { Chat } from '@/data/chats';
+import type { ChatPreview, SteamFriend } from '@/context/steam-chat';
+import { formatChatListTime } from '@/lib/steam/chat-utils';
 import { ChatAvatar } from './chat-avatar';
 
 type ChatRowProps = {
-  chat: Chat;
-  onPress: (chat: Chat) => void;
+  friend: SteamFriend;
+  preview?: ChatPreview;
+  unread: number;
+  onPress: () => void;
 };
 
-export function ChatRow({ chat, onPress }: ChatRowProps) {
+export function ChatRow({ friend, preview, unread, onPress }: ChatRowProps) {
+  const timestamp = preview ? formatChatListTime(preview.sentAt) : '';
+  const previewText = preview
+    ? `${preview.mine ? 'You: ' : ''}${preview.text}`
+    : 'No messages yet';
+
   return (
     <Pressable
       accessibilityHint="Opens the conversation"
-      accessibilityLabel={`${chat.name}. ${chat.preview}. ${chat.timestamp}${
-        chat.unread ? '. Unread' : ''
+      accessibilityLabel={`${friend.name}. ${previewText}. ${timestamp}${
+        unread > 0 ? `. ${unread} unread` : ''
       }`}
       accessibilityRole="button"
       android_ripple={{ color: SteamColors.rowPressed }}
-      onPress={() => onPress(chat)}
+      onPress={onPress}
       style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}>
-      <ChatAvatar
-        background={chat.avatarBackground}
-        participants={chat.participants}
-        rounded
-        size={48}
-        source={chat.avatar}
-      />
+      <ChatAvatar name={friend.name} rounded size={48} uri={friend.avatarUrl} />
 
       <View style={styles.copy}>
         <View style={styles.titleRow}>
           <Text numberOfLines={1} style={styles.name}>
-            {chat.name}
+            {friend.name}
           </Text>
-          <Text style={styles.timestamp}>{chat.timestamp}</Text>
+          <Text style={styles.timestamp}>{timestamp}</Text>
         </View>
 
         <View style={styles.previewRow}>
-          <Text numberOfLines={2} style={styles.preview}>
-            {chat.preview}
+          <Text
+            numberOfLines={2}
+            style={[styles.preview, unread > 0 && styles.previewUnread]}>
+            {previewText}
           </Text>
-          {chat.unread ? <View style={styles.unreadDot} /> : null}
+          {unread > 0 ? <View style={styles.unreadDot} /> : null}
         </View>
       </View>
     </Pressable>
@@ -95,6 +99,9 @@ const styles = StyleSheet.create({
     color: SteamColors.muted,
     fontSize: 14.5,
     lineHeight: 19,
+  },
+  previewUnread: {
+    color: SteamColors.text,
   },
   unreadDot: {
     width: 8,

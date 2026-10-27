@@ -1,7 +1,7 @@
-import * as ImagePicker from 'expo-image-picker';
 import { SymbolView } from 'expo-symbols';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -14,43 +14,55 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ImageViewer } from '@/components/chat/image-viewer';
+import { ChatAvatar } from '@/components/chats/chat-avatar';
 import { MessageBubble } from '@/components/chat/message-bubble';
-import { DemoNotice } from '@/components/steam/demo-notice';
 import { AppMaxWidth, SteamColors } from '@/constants/steam-theme';
-import type { ChatMessage, OutgoingMessage } from '@/data/messages';
-import { useDemoNotice } from '@/hooks/use-demo-notice';
+import type { ChatMessage, SteamFriend } from '@/context/steam-chat';
+import type { SteamCmConnectionState } from '@/lib/steam/cm-client';
+import { describeFriendStatus } from '@/lib/steam/chat-utils';
 
 type ConversationScreenProps = {
-  avatar: ReactNode;
-  emptyMessage: string;
+  authError?: number | null;
+  connection: SteamCmConnectionState;
+  error?: string;
+  friend: SteamFriend;
+  friendTyping: boolean;
+  hasMore: boolean;
+  loading: boolean;
   messages: ChatMessage[];
-  onAddPeople?: () => void;
   onBack: () => void;
-  onSendMessage: (message: OutgoingMessage) => void;
-  subtitle: string;
-  title: string;
+  onLoadMore: () => void;
+  onRetry?: () => void;
+  onSend: (text: string) => void;
+  onTyping: () => void;
+  ready: boolean;
 };
 
 export function ConversationScreen({
-  avatar,
-  emptyMessage,
+  authError,
+  connection,
+  error,
+  friend,
+  friendTyping,
+  hasMore,
+  loading,
   messages,
-  onAddPeople,
   onBack,
-  onSendMessage,
-  subtitle,
-  title,
+  onLoadMore,
+  onRetry,
+  onSend,
+  onTyping,
+  ready,
 }: ConversationScreenProps) {
   const insets = useSafeAreaInsets();
-  const { message, showNotice } = useDemoNotice();
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const [draft, setDraft] = useState('');
-  const [pickingImage, setPickingImage] = useState(false);
-  const [viewerImage, setViewerImage] = useState<string | null>(null);
+  const lastMessageId = messages[messages.length - 1]?.id ?? null;
 
+  // Keyed on the newest message rather than the array length so that loading
+  // older history does not yank the list back to the bottom.
   useEffect(() => {
-    if (messages.length === 0) {
+    if (!lastMessageId) {
       return;
     }
 
@@ -59,7 +71,7 @@ export function ConversationScreen({
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [messages.length]);
+  }, [lastMessageId]);
 
   useEffect(() => {
     const subscription = Keyboard.addListener('keyboardDidShow', () => {
@@ -74,51 +86,18 @@ export function ConversationScreen({
   const handleSend = () => {
     const text = draft.trim();
 
-    if (!text) {
+    if (!text || !ready) {
       return;
     }
 
-    onSendMessage({ kind: 'text', text });
+    onSend(text);
     setDraft('');
   };
 
-  const handleOpenImage = (uri: string) => {
-    Keyboard.dismiss();
-    setViewerImage(uri);
-  };
-
-  const handlePickImage = async () => {
-    if (pickingImage) {
-      return;
-    }
-
-    setPickingImage(true);
-    Keyboard.dismiss();
-
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsMultipleSelection: false,
-        quality: 0.85,
-      });
-
-      if (result.canceled || !result.assets[0]) {
-        return;
-      }
-
-      const asset = result.assets[0];
-      onSendMessage({
-        kind: 'image',
-        uri: asset.uri,
-        width: asset.width,
-        height: asset.height,
-      });
-    } catch {
-      showNotice('Could not open your photo library. Please try again.');
-    } finally {
-      setPickingImage(false);
-    }
-  };
+  const status = describeFriendStatus(friend);
+  const connectionLabel =
+    connection === 'connected' ? 'Signing in to Steam…' : 'Reconnecting to Steam…';
+  const subtitle = friendTyping ? 'typing…' : status;
 
   return (
     <View style={styles.screen}>
@@ -144,56 +123,55 @@ export function ConversationScreen({
           </Pressable>
 
           <View style={styles.identity}>
-            {avatar}
+            <ChatAvatar name={friend.name} size={46} uri={friend.avatarUrl} />
 
             <View style={styles.titleCopy}>
-              <View style={styles.titleRow}>
-                <Text numberOfLines={1} style={styles.title}>
-                  {title}
-                </Text>
-                <SymbolView
-                  name={{ ios: 'chevron.down', android: 'expand_more', web: 'expand_more' }}
-                  size={13}
-                  tintColor={SteamColors.iconMuted}
-                />
-              </View>
+              <Text numberOfLines={1} style={styles.title}>
+                {friend.name}
+              </Text>
               <Text numberOfLines={1} style={styles.subtitle}>
                 {subtitle}
               </Text>
             </View>
           </View>
 
-          {onAddPeople ? (
-            <Pressable
-              accessibilityLabel="Add people to chat"
-              accessibilityRole="button"
-              hitSlop={6}
-              onPress={onAddPeople}
-              style={({ pressed }) => [
-                styles.iconButton,
-                styles.addButton,
-                pressed && styles.iconButtonPressed,
-              ]}>
-              <SymbolView
-                name={{ ios: 'person.badge.plus', android: 'person_add', web: 'person_add' }}
-                size={23}
-                tintColor={SteamColors.icon}
-              />
-            </Pressable>
-          ) : (
-            <View style={styles.actionSpacer} />
-          )}
+          <View style={styles.actionSpacer} />
         </View>
       </View>
+
+      {!ready || error ? (
+        <View style={[styles.banner, error || authError ? styles.bannerError : undefined]}>
+          {!ready && !authError ? (
+            <ActivityIndicator color={SteamColors.muted} size="small" />
+          ) : null}
+          <Text style={[styles.bannerText, error || authError ? styles.bannerTextError : undefined]}>
+            {error ??
+              (authError
+                ? 'Steam refused the chat connection. You are still signed in.'
+                : connectionLabel)}
+          </Text>
+          {authError && onRetry ? (
+            <Pressable
+              accessibilityRole="button"
+              hitSlop={8}
+              onPress={onRetry}
+              style={({ pressed }) => [styles.retry, pressed && styles.pressed]}>
+              <Text style={styles.retryText}>Retry</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       <KeyboardAvoidingView
         behavior={
           Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined
         }
         style={styles.body}>
-        {messages.length === 0 ? (
+        {messages.length === 0 && !loading ? (
           <View style={styles.emptyWrap}>
-            <Text style={styles.emptyText}>{emptyMessage}</Text>
+            <Text style={styles.emptyText}>
+              No messages yet. Say hi to {friend.name}.
+            </Text>
           </View>
         ) : (
           <FlatList
@@ -203,10 +181,29 @@ export function ConversationScreen({
             keyExtractor={(item) => item.id}
             keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
             keyboardShouldPersistTaps="handled"
-            onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-            renderItem={({ item }) => (
-              <MessageBubble message={item} onOpenImage={handleOpenImage} />
-            )}
+            ListEmptyComponent={
+              <View style={styles.loadingWrap}>
+                <ActivityIndicator color={SteamColors.muted} size="small" />
+              </View>
+            }
+            ListHeaderComponent={
+              hasMore || loading ? (
+                <View style={styles.historyHeader}>
+                  {loading ? (
+                    <ActivityIndicator color={SteamColors.muted} size="small" />
+                  ) : (
+                    <Pressable
+                      accessibilityLabel="Load earlier messages"
+                      accessibilityRole="button"
+                      onPress={onLoadMore}
+                      style={({ pressed }) => [styles.loadMore, pressed && styles.pressed]}>
+                      <Text style={styles.loadMoreText}>Load earlier messages</Text>
+                    </Pressable>
+                  )}
+                </View>
+              ) : undefined
+            }
+            renderItem={({ item }) => <MessageBubble message={item} />}
             showsVerticalScrollIndicator={false}
             style={styles.messagesList}
           />
@@ -214,32 +211,20 @@ export function ConversationScreen({
 
         <View style={styles.composer}>
           <View style={[styles.composerRow, { paddingBottom: Math.max(insets.bottom, 10) }]}>
-            <Pressable
-              accessibilityLabel="Send a photo"
-              accessibilityRole="button"
-              accessibilityState={{ disabled: pickingImage }}
-              disabled={pickingImage}
-              hitSlop={4}
-              onPress={handlePickImage}
-              style={({ pressed }) => [
-                styles.photoButton,
-                pickingImage && styles.pressed,
-                pressed && styles.pressed,
-              ]}>
-              <SymbolView
-                name={{ ios: 'photo', android: 'image', web: 'image' }}
-                size={23}
-                tintColor={SteamColors.icon}
-              />
-            </Pressable>
-
             <View style={styles.inputShell}>
               <TextInput
                 accessibilityLabel="Message"
                 autoCapitalize="sentences"
-                onChangeText={setDraft}
+                editable={ready}
+                onChangeText={(value) => {
+                  setDraft(value);
+
+                  if (value.trim().length > 0) {
+                    onTyping();
+                  }
+                }}
                 onSubmitEditing={handleSend}
-                placeholder="Message"
+                placeholder={ready ? 'Message' : 'Connecting to Steam…'}
                 placeholderTextColor={SteamColors.muted}
                 returnKeyType="send"
                 selectionColor={SteamColors.accent}
@@ -247,25 +232,19 @@ export function ConversationScreen({
                 underlineColorAndroid="transparent"
                 value={draft}
               />
-              <Pressable
-                accessibilityLabel="Open emoji picker"
-                accessibilityRole="button"
-                hitSlop={4}
-                onPress={() => showNotice('Emoji picking is not connected in this demo.')}
-                style={({ pressed }) => [styles.emojiButton, pressed && styles.pressed]}>
-                <SymbolView
-                  name={{ ios: 'face.smiling', android: 'mood', web: 'mood' }}
-                  size={23}
-                  tintColor={SteamColors.iconMuted}
-                />
-              </Pressable>
             </View>
 
             <Pressable
               accessibilityLabel="Send message"
               accessibilityRole="button"
+              accessibilityState={{ disabled: !ready || draft.trim().length === 0 }}
+              disabled={!ready || draft.trim().length === 0}
               onPress={handleSend}
-              style={({ pressed }) => [styles.sendButton, pressed && styles.sendButtonPressed]}>
+              style={({ pressed }) => [
+                styles.sendButton,
+                (!ready || draft.trim().length === 0) && styles.sendButtonDisabled,
+                pressed && styles.sendButtonPressed,
+              ]}>
               <SymbolView
                 name={{ ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' }}
                 size={22}
@@ -275,10 +254,6 @@ export function ConversationScreen({
           </View>
         </View>
       </KeyboardAvoidingView>
-
-      <DemoNotice bottom={insets.bottom + 70} message={message} />
-
-      <ImageViewer imageUri={viewerImage} onClose={() => setViewerImage(null)} />
     </View>
   );
 }
@@ -315,9 +290,6 @@ const styles = StyleSheet.create({
   iconButtonPressed: {
     backgroundColor: SteamColors.chromePressed,
   },
-  addButton: {
-    marginLeft: 2,
-  },
   actionSpacer: {
     width: 44,
     height: 44,
@@ -333,13 +305,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
   title: {
-    flexShrink: 1,
     color: SteamColors.text,
     fontSize: 19,
     lineHeight: 24,
@@ -350,6 +316,41 @@ const styles = StyleSheet.create({
     color: SteamColors.muted,
     fontSize: 14,
     lineHeight: 18,
+  },
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: SteamColors.chromeDeep,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: SteamColors.border,
+  },
+  bannerError: {
+    backgroundColor: '#3A2426',
+  },
+  bannerText: {
+    flexShrink: 1,
+    color: SteamColors.muted,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  bannerTextError: {
+    color: SteamColors.error,
+  },
+  retry: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 3,
+    backgroundColor: SteamColors.accentDeep,
+  },
+  retryText: {
+    color: SteamColors.textStrong,
+    fontSize: 12.5,
+    lineHeight: 17,
   },
   body: {
     flex: 1,
@@ -364,6 +365,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 16,
     paddingBottom: 10,
+  },
+  historyHeader: {
+    alignItems: 'center',
+    paddingBottom: 4,
+  },
+  loadMore: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  loadMoreText: {
+    color: SteamColors.accent,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  loadingWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   emptyWrap: {
     flex: 1,
@@ -391,12 +410,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 8,
   },
-  photoButton: {
-    width: 38,
-    height: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   inputShell: {
     flex: 1,
     minWidth: 0,
@@ -405,8 +418,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderRadius: 4,
     backgroundColor: SteamColors.canvasRaised,
-    paddingLeft: 14,
-    paddingRight: 2,
+    paddingHorizontal: 14,
   },
   input: {
     flex: 1,
@@ -416,12 +428,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     outlineWidth: 0,
     paddingVertical: 0,
-  },
-  emojiButton: {
-    width: 42,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   sendButton: {
     width: 52,
@@ -433,6 +439,9 @@ const styles = StyleSheet.create({
   },
   sendButtonPressed: {
     backgroundColor: SteamColors.accentPressed,
+  },
+  sendButtonDisabled: {
+    opacity: 0.42,
   },
   pressed: {
     opacity: 0.6,

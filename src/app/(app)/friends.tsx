@@ -1,16 +1,19 @@
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { BackHandler, ScrollView, StyleSheet, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, BackHandler, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { FriendRow } from '@/components/friends/friend-row';
 import { FriendSectionHeader } from '@/components/friends/friend-section-header';
 import { AppHeader } from '@/components/steam/app-header';
+import { ConnectionBanner } from '@/components/steam/connection-banner';
 import { SearchEmpty } from '@/components/steam/search-empty';
 import { AppMaxWidth, SteamColors } from '@/constants/steam-theme';
-import { offlineFriends, onlineFriends, type Friend } from '@/data/friends';
+import { useSteamChat, type SteamFriend } from '@/context/steam-chat';
+import { FRIEND_RELATIONSHIP_FRIEND } from '@/lib/steam/cm-proto';
 
 export default function FriendsScreen() {
   const router = useRouter();
+  const { friends, connection, loggedOn, authError, retryConnection } = useSteamChat();
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -31,8 +34,32 @@ export default function FriendsScreen() {
     return () => subscription.remove();
   }, [searchOpen]);
 
+  const allFriends = useMemo(
+    () =>
+      Object.values(friends).filter(
+        (friend) => friend.relationship === FRIEND_RELATIONSHIP_FRIEND,
+      ),
+    [friends],
+  );
+
+  const onlineFriends = useMemo(
+    () =>
+      allFriends
+        .filter((friend) => friend.status !== 'offline')
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [allFriends],
+  );
+
+  const offlineFriends = useMemo(
+    () =>
+      allFriends
+        .filter((friend) => friend.status === 'offline')
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [allFriends],
+  );
+
   const normalizedQuery = query.trim().toLowerCase();
-  const matchesQuery = (friend: Friend) =>
+  const matchesQuery = (friend: SteamFriend) =>
     friend.name.toLowerCase().includes(normalizedQuery);
 
   const visibleOnline = normalizedQuery ? onlineFriends.filter(matchesQuery) : onlineFriends;
@@ -51,19 +78,13 @@ export default function FriendsScreen() {
     setQuery('');
   };
 
-  const handleFriendPress = (friend: Friend) => {
-    router.push({ pathname: '/friend/[id]', params: { id: friend.id } });
-  };
-
-  const handleOpenNewChat = () => {
-    router.push('/new-chat');
+  const handleFriendPress = (friend: SteamFriend) => {
+    router.push({ pathname: '/friend/[id]', params: { id: friend.steamId } });
   };
 
   return (
     <View style={styles.screen}>
       <AppHeader
-        addLabel="New chat"
-        onAddPress={handleOpenNewChat}
         onSearchPress={handleOpenSearch}
         searchPlaceholder="Search friends"
         search={
@@ -71,6 +92,13 @@ export default function FriendsScreen() {
             ? { value: query, onChangeText: setQuery, onCancel: handleCancelSearch }
             : undefined
         }
+      />
+
+      <ConnectionBanner
+        authError={authError}
+        connection={connection}
+        loggedOn={loggedOn}
+        onRetry={retryConnection}
       />
 
       <ScrollView
@@ -86,6 +114,26 @@ export default function FriendsScreen() {
               message={`No friends match "${query.trim()}". Try a different name.`}
               title="No friends found"
             />
+          ) : allFriends.length === 0 ? (
+            <View style={styles.empty}>
+              {loggedOn || authError ? null : (
+                <ActivityIndicator color={SteamColors.muted} size="small" />
+              )}
+              <Text style={styles.emptyTitle}>
+                {loggedOn
+                  ? 'No friends yet'
+                  : authError
+                    ? 'Friends unavailable'
+                    : 'Loading your friends'}
+              </Text>
+              <Text style={styles.emptyBody}>
+                {loggedOn
+                  ? 'Friends you add on Steam will appear here.'
+                  : authError
+                    ? 'Retry the connection above to load your friends.'
+                    : 'Steam is sending your friends list.'}
+              </Text>
+            </View>
           ) : (
             <>
               {!normalizedQuery || visibleOnline.length > 0 ? (
@@ -98,7 +146,7 @@ export default function FriendsScreen() {
                   />
                   {!onlineCollapsed
                     ? visibleOnline.map((friend) => (
-                        <FriendRow friend={friend} key={friend.id} onPress={handleFriendPress} />
+                        <FriendRow friend={friend} key={friend.steamId} onPress={handleFriendPress} />
                       ))
                     : null}
                 </>
@@ -114,7 +162,7 @@ export default function FriendsScreen() {
                   />
                   {!offlineCollapsed
                     ? visibleOffline.map((friend) => (
-                        <FriendRow friend={friend} key={friend.id} onPress={handleFriendPress} />
+                        <FriendRow friend={friend} key={friend.steamId} onPress={handleFriendPress} />
                       ))
                     : null}
                 </>
@@ -145,5 +193,24 @@ const styles = StyleSheet.create({
     maxWidth: AppMaxWidth,
     alignSelf: 'center',
     flexGrow: 1,
+  },
+  empty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 30,
+    paddingVertical: 60,
+  },
+  emptyTitle: {
+    color: SteamColors.text,
+    fontSize: 17,
+    lineHeight: 22,
+  },
+  emptyBody: {
+    color: SteamColors.muted,
+    fontSize: 14.5,
+    lineHeight: 20,
+    textAlign: 'center',
   },
 });

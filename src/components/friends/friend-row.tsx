@@ -3,30 +3,13 @@ import { SymbolView } from 'expo-symbols';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { FriendAvatarSize, SteamColors } from '@/constants/steam-theme';
-import type { Friend, FriendPlatform, FriendStatus } from '@/data/friends';
+import type { SteamFriend } from '@/context/steam-chat';
+import { describeFriendStatus, type FriendStatus } from '@/lib/steam/chat-utils';
 
 type FriendRowProps = {
-  friend: Friend;
-  onPress: (friend: Friend) => void;
+  friend: SteamFriend;
+  onPress: (friend: SteamFriend) => void;
 };
-
-const statusCopy = {
-  online: 'Online',
-  away: 'Away',
-} as const;
-
-const platformIcons = {
-  deck: {
-    ios: 'gamecontroller.fill',
-    android: 'sports_esports',
-    web: 'sports_esports',
-  },
-  mobile: {
-    ios: 'iphone',
-    android: 'smartphone',
-    web: 'smartphone',
-  },
-} as const;
 
 function StatusRail({ status }: { status: FriendStatus }) {
   if (status === 'online') {
@@ -40,18 +23,6 @@ function StatusRail({ status }: { status: FriendStatus }) {
       {Array.from({ length: 6 }, (_, index) => (
         <View key={index} style={[styles.statusRailSegment, segmentStyle]} />
       ))}
-    </View>
-  );
-}
-
-function PlatformBadge({ platform }: { platform: FriendPlatform }) {
-  return (
-    <View accessible={false} style={styles.platformBadge}>
-      <SymbolView
-        name={platformIcons[platform]}
-        size={10}
-        tintColor="#DDEBFA"
-      />
     </View>
   );
 }
@@ -72,32 +43,22 @@ export function FriendRow({ friend, onPress }: FriendRowProps) {
       ? styles.statusAway
       : styles.statusOffline;
 
-  const secondaryText =
-    friend.status === 'offline'
-      ? `Last online ${friend.lastOnline ?? 'a while ago'}`
-      : statusCopy[friend.status];
-
-  const accessibilityLabel = `${friend.name}, ${secondaryText}`;
+  const secondaryText = describeFriendStatus(friend);
 
   return (
     <Pressable
       accessibilityHint="Opens a chat with this friend"
-      accessibilityLabel={accessibilityLabel}
+      accessibilityLabel={`${friend.name}, ${secondaryText}`}
       accessibilityRole="button"
       android_ripple={{ color: SteamColors.rowPressed }}
       onPress={() => onPress(friend)}
       style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}>
-      <View
-        style={[
-          styles.avatar,
-          { backgroundColor: friend.avatarBackground },
-          friend.status === 'offline' && styles.avatarOffline,
-        ]}>
+      <View style={[styles.avatar, friend.status === 'offline' && styles.avatarOffline]}>
         <Image
           accessible={false}
           contentFit="cover"
           importantForAccessibility="no"
-          source={friend.avatar}
+          source={{ uri: friend.avatarUrl }}
           style={styles.avatarImage}
         />
         <StatusRail status={friend.status} />
@@ -108,9 +69,15 @@ export function FriendRow({ friend, onPress }: FriendRowProps) {
           <Text numberOfLines={1} style={[styles.name, nameStyle]}>
             {friend.name}
           </Text>
-          {friend.platforms?.map((platform) => (
-            <PlatformBadge key={platform} platform={platform} />
-          ))}
+          {friend.onSteamDeck ? (
+            <View accessible={false} style={styles.platformBadge}>
+              <SymbolView
+                name={{ ios: 'gamecontroller.fill', android: 'sports_esports', web: 'sports_esports' }}
+                size={10}
+                tintColor="#DDEBFA"
+              />
+            </View>
+          ) : null}
           {away ? <Text style={styles.zzz}>zZ</Text> : null}
         </View>
 

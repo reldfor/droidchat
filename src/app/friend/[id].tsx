@@ -1,72 +1,105 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { StyleSheet, Text, View } from 'react-native';
+import { useEffect } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { ChatAvatar } from '@/components/chats/chat-avatar';
 import { ConversationScreen } from '@/components/chat/conversation-screen';
 import { ScreenHeader } from '@/components/steam/screen-header';
 import { SteamColors } from '@/constants/steam-theme';
-import { useChatStore } from '@/context/chat-store';
-import type { OutgoingMessage } from '@/data/messages';
-import { getFriendById } from '@/data/friends';
+import { useSteamChat } from '@/context/steam-chat';
 
 export default function FriendChatScreen() {
   const router = useRouter();
-  const { messagesByConversation, sendMessage } = useChatStore();
   const params = useLocalSearchParams<{ id?: string | string[] }>();
-  const friendId = Array.isArray(params.id) ? params.id[0] : params.id;
-  const friend = getFriendById(friendId);
+  const steamId = Array.isArray(params.id) ? params.id[0] : params.id;
 
-  if (!friend) {
+  const {
+    friends,
+    conversations,
+    authError,
+    connection,
+    loggedOn,
+    ready,
+    openConversation,
+    closeConversation,
+    loadMore,
+    markRead,
+    retryConnection,
+    sendMessage,
+    sendTyping,
+    typing,
+  } = useSteamChat();
+
+  useEffect(() => {
+    if (!steamId) {
+      return;
+    }
+
+    openConversation(steamId);
+
+    return () => closeConversation(steamId);
+  }, [steamId, openConversation, closeConversation]);
+
+  const friend = steamId ? friends[steamId] : undefined;
+  const conversation = steamId ? conversations[steamId] : undefined;
+  const friendTyping = steamId ? Boolean(typing[steamId]) : false;
+  const lastMessageAt = conversation?.messages[conversation.messages.length - 1]?.sentAt ?? 0;
+
+  // Read receipts: ack once history is on screen and whenever a new message
+  // arrives while the conversation is open.
+  useEffect(() => {
+    if (!steamId || lastMessageAt <= 0) {
+      return;
+    }
+
+    markRead(steamId, lastMessageAt);
+  }, [steamId, lastMessageAt, markRead]);
+
+  if (!steamId || !friend) {
     return (
       <View style={styles.screen}>
         <ScreenHeader backLabel="Go back" onBack={() => router.back()} title="Chat" />
         <View style={styles.fallback}>
-          <Text style={styles.fallbackText}>This friend could not be found.</Text>
+          {authError ? (
+            <>
+              <Text style={styles.fallbackText}>
+                Steam refused the chat connection. You are still signed in.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={retryConnection}
+                style={({ pressed }) => [styles.retry, pressed && styles.pressed]}>
+                <Text style={styles.retryText}>Retry</Text>
+              </Pressable>
+            </>
+          ) : !loggedOn ? (
+            <>
+              <ActivityIndicator color={SteamColors.muted} size="small" />
+              <Text style={styles.fallbackText}>Connecting to Steam…</Text>
+            </>
+          ) : (
+            <Text style={styles.fallbackText}>This friend could not be found.</Text>
+          )}
         </View>
       </View>
     );
   }
 
-  const subtitle =
-    friend.status === 'offline'
-      ? `Last online ${friend.lastOnline ?? 'a while ago'}`
-      : friend.status === 'away'
-        ? 'Away'
-        : 'Online';
-
-  const handleSendMessage = (message: OutgoingMessage) => {
-    sendMessage(friend.id, message, {
-      id: friend.id,
-      name: friend.name,
-      kind: 'direct',
-      preview: '',
-      timestamp: '',
-      avatar: friend.avatar,
-      avatarBackground: friend.avatarBackground,
-    });
-  };
-
   return (
     <ConversationScreen
-      avatar={
-        <ChatAvatar
-          background={friend.avatarBackground}
-          size={46}
-          source={friend.avatar}
-        />
-      }
-      emptyMessage="You have no recent messages with this friend."
-      messages={messagesByConversation[friend.id] ?? []}
-      onAddPeople={() =>
-        router.push({
-          pathname: '/new-chat',
-          params: { with: friend.id },
-        })
-      }
+      authError={authError}
+      connection={connection}
+      error={conversation?.error}
+      friend={friend}
+      friendTyping={friendTyping}
+      hasMore={conversation?.hasMore ?? false}
+      loading={conversation?.loading ?? false}
+      messages={conversation?.messages ?? []}
       onBack={() => router.back()}
-      onSendMessage={handleSendMessage}
-      subtitle={subtitle}
-      title={friend.name}
+      onLoadMore={() => loadMore(steamId)}
+      onRetry={retryConnection}
+      onSend={(text) => sendMessage(steamId, text)}
+      onTyping={() => sendTyping(steamId)}
+      ready={ready}
     />
   );
 }
@@ -80,6 +113,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 10,
     paddingHorizontal: 30,
   },
   fallbackText: {
@@ -87,5 +121,20 @@ const styles = StyleSheet.create({
     fontSize: 17,
     lineHeight: 24,
     textAlign: 'center',
+  },
+  retry: {
+    marginTop: 6,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 4,
+    backgroundColor: SteamColors.accentDeep,
+  },
+  retryText: {
+    color: SteamColors.textStrong,
+    fontSize: 15,
+    lineHeight: 20,
+  },
+  pressed: {
+    opacity: 0.7,
   },
 });

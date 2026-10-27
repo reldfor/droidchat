@@ -1,21 +1,25 @@
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { BackHandler, ScrollView, StyleSheet, View } from 'react-native';
+import {
+  ActivityIndicator,
+  BackHandler,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import { ChatRow } from '@/components/chats/chat-row';
 import { AppHeader } from '@/components/steam/app-header';
-import { DemoNotice } from '@/components/steam/demo-notice';
+import { ConnectionBanner } from '@/components/steam/connection-banner';
 import { SearchEmpty } from '@/components/steam/search-empty';
 import { AppMaxWidth, SteamColors } from '@/constants/steam-theme';
-import { useChatStore } from '@/context/chat-store';
-import type { Chat } from '@/data/chats';
-import { getFriendById } from '@/data/friends';
-import { useDemoNotice } from '@/hooks/use-demo-notice';
+import { useSteamChat, type ChatListItem } from '@/context/steam-chat';
 
 export default function ChatsScreen() {
   const router = useRouter();
-  const { chats } = useChatStore();
-  const { message, showNotice } = useDemoNotice();
+  const { chats, connection, loggedOn, authError, retryConnection } = useSteamChat();
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -38,8 +42,8 @@ export default function ChatsScreen() {
   const visibleChats = normalizedQuery
     ? chats.filter(
         (chat) =>
-          chat.name.toLowerCase().includes(normalizedQuery) ||
-          chat.preview.toLowerCase().includes(normalizedQuery),
+          chat.friend.name.toLowerCase().includes(normalizedQuery) ||
+          chat.conversation.preview?.text.toLowerCase().includes(normalizedQuery),
       )
     : chats;
   const noResults = normalizedQuery.length > 0 && visibleChats.length === 0;
@@ -49,34 +53,27 @@ export default function ChatsScreen() {
     setQuery('');
   };
 
-  const handleChatPress = (chat: Chat) => {
-    const friend = chat.kind === 'direct' ? getFriendById(chat.id) : undefined;
-
-    if (friend) {
-      router.push({ pathname: '/friend/[id]', params: { id: friend.id } });
-      return;
-    }
-
-    if (chat.kind === 'group' && chat.participants?.length) {
-      router.push({ pathname: '/group-chat/[id]', params: { id: chat.id } });
-      return;
-    }
-
-    showNotice(`Opening ${chat.name} is not available in this demo.`);
+  const handleChatPress = (chat: ChatListItem) => {
+    router.push({ pathname: '/friend/[id]', params: { id: chat.friend.steamId } });
   };
 
   return (
     <View style={styles.screen}>
       <AppHeader
-        addLabel="New chat"
-        onAddPress={() => router.push('/new-chat')}
         onSearchPress={() => setSearchOpen(true)}
+        searchPlaceholder="Search chats"
         search={
           searchOpen
             ? { value: query, onChangeText: setQuery, onCancel: handleCancelSearch }
             : undefined
         }
-        searchPlaceholder="Search chats"
+      />
+
+      <ConnectionBanner
+        authError={authError}
+        connection={connection}
+        loggedOn={loggedOn}
+        onRetry={retryConnection}
       />
 
       <ScrollView
@@ -92,15 +89,41 @@ export default function ChatsScreen() {
               message={`No chats match "${query.trim()}". Try a different name.`}
               title="No chats found"
             />
+          ) : chats.length === 0 ? (
+            <View style={styles.empty}>
+              {!loggedOn && !authError ? (
+                <ActivityIndicator color={SteamColors.muted} size="small" />
+              ) : null}
+              <Text style={styles.emptyTitle}>
+                {loggedOn || authError ? 'No chats yet' : 'Loading your chats'}
+              </Text>
+              <Text style={styles.emptyBody}>
+                {loggedOn || authError
+                  ? 'Open a friend from your friends list to start a conversation.'
+                  : 'Steam is sending your recent conversations.'}
+              </Text>
+              {loggedOn || authError ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => router.navigate('/friends')}
+                  style={({ pressed }) => [styles.emptyButton, pressed && styles.pressed]}>
+                  <Text style={styles.emptyButtonText}>Find friends</Text>
+                </Pressable>
+              ) : null}
+            </View>
           ) : (
             visibleChats.map((chat) => (
-              <ChatRow chat={chat} key={chat.id} onPress={handleChatPress} />
+              <ChatRow
+                friend={chat.friend}
+                key={chat.friend.steamId}
+                onPress={() => handleChatPress(chat)}
+                preview={chat.conversation.preview}
+                unread={chat.conversation.unread}
+              />
             ))
           )}
         </View>
       </ScrollView>
-
-      <DemoNotice message={message} />
     </View>
   );
 }
@@ -123,5 +146,40 @@ const styles = StyleSheet.create({
     maxWidth: AppMaxWidth,
     alignSelf: 'center',
     flexGrow: 1,
+  },
+  empty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 30,
+    paddingVertical: 60,
+  },
+  emptyTitle: {
+    color: SteamColors.text,
+    fontSize: 17,
+    lineHeight: 22,
+  },
+  emptyBody: {
+    maxWidth: 320,
+    color: SteamColors.muted,
+    fontSize: 14.5,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  emptyButton: {
+    marginTop: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 4,
+    backgroundColor: SteamColors.accentDeep,
+  },
+  emptyButtonText: {
+    color: SteamColors.textStrong,
+    fontSize: 15,
+    lineHeight: 20,
+  },
+  pressed: {
+    opacity: 0.7,
   },
 });

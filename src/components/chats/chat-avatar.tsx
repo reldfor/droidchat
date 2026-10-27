@@ -1,103 +1,71 @@
 import { Image } from 'expo-image';
-import { StyleSheet, View, type ImageStyle } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { SteamColors } from '@/constants/steam-theme';
-import type { Friend } from '@/data/friends';
 
 type ChatAvatarProps = {
   background?: string;
-  participants?: Friend[];
+  name?: string;
   rounded?: boolean;
   size: number;
-  source?: number;
+  uri?: string | null;
 };
 
-function tileStyle(index: number, count: number, size: number): ImageStyle {
-  if (count === 1) {
-    return { width: size, height: size };
+const fallbackColors = ['#24404A', '#3B2E4A', '#47352B', '#13243A', '#12312B', '#312216'];
+
+function fallbackColor(name: string | undefined): string {
+  if (!name) {
+    return SteamColors.canvasRaised;
   }
 
-  if (count === 2) {
-    return { width: size / 2, height: size, left: (size / 2) * index };
+  let hash = 0;
+
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
   }
 
-  if (count === 3) {
-    return { width: size / 3, height: size, left: (size / 3) * index };
-  }
-
-  return {
-    width: size / 2,
-    height: size / 2,
-    left: (index % 2) * (size / 2),
-    top: Math.floor(index / 2) * (size / 2),
-  };
+  return fallbackColors[hash % fallbackColors.length];
 }
 
-export function ChatAvatar({
-  background,
-  participants,
-  rounded = false,
-  size,
-  source,
-}: ChatAvatarProps) {
-  const frameStyle = [
-    styles.frame,
-    {
-      width: size,
-      height: size,
-      borderRadius: rounded ? size / 2 : 2,
-      backgroundColor: background ?? SteamColors.canvasRaised,
-    },
-  ];
-
-  if (participants && participants.length > 0) {
-    const visibleParticipants = participants.slice(0, 4);
-
-    return (
-      <View style={frameStyle}>
-        {visibleParticipants.map((participant, index) => (
-          <Image
-            accessible={false}
-            contentFit="cover"
-            importantForAccessibility="no"
-            key={participant.id}
-            source={participant.avatar}
-            style={[
-              styles.tile,
-              tileStyle(index, visibleParticipants.length, size),
-              { backgroundColor: participant.avatarBackground },
-            ]}
-          />
-        ))}
-      </View>
-    );
-  }
+export function ChatAvatar({ background, name, rounded = false, size, uri }: ChatAvatarProps) {
+  const frameStyle = {
+    width: size,
+    height: size,
+    borderRadius: rounded ? size / 2 : 2,
+    backgroundColor: background ?? fallbackColor(name),
+  };
 
   return (
-    <View style={frameStyle}>
-      {source != null ? (
+    <View style={[styles.frame, frameStyle]}>
+      {uri ? (
         <Image
           accessible={false}
           contentFit="cover"
           importantForAccessibility="no"
-          source={source}
+          source={{ uri }}
           style={styles.fill}
         />
-      ) : null}
+      ) : (
+        <Text style={[styles.initial, { fontSize: size * 0.42, lineHeight: size * 0.52 }]}>
+          {name?.trim().charAt(0).toUpperCase() ?? '?'}
+        </Text>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   frame: {
+    alignItems: 'center',
+    justifyContent: 'center',
     overflow: 'hidden',
-  },
-  tile: {
-    position: 'absolute',
-    top: 0,
   },
   fill: {
     width: '100%',
     height: '100%',
+  },
+  initial: {
+    color: '#DCE4EA',
+    fontWeight: '600',
   },
 });

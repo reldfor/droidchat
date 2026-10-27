@@ -12,6 +12,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SteamColors } from '@/constants/steam-theme';
 import { useSession } from '@/context/session';
+import { useSteamChat } from '@/context/steam-chat';
 import { SteamMark } from './steam-mark';
 
 type AccountDrawerProps = {
@@ -30,11 +31,6 @@ const navItems = [
     label: 'Chats',
     icon: { ios: 'bubble.left.fill', android: 'chat_bubble', web: 'chat_bubble' } as const,
   },
-  {
-    href: '/groups' as const,
-    label: 'Groups',
-    icon: { ios: 'person.3.fill', android: 'groups', web: 'groups' } as const,
-  },
 ];
 
 export function AccountDrawer({ visible, onClose }: AccountDrawerProps) {
@@ -43,10 +39,19 @@ export function AccountDrawer({ visible, onClose }: AccountDrawerProps) {
   const pathname = usePathname();
   const { width } = useWindowDimensions();
   const { accountName, signOut } = useSession();
+  const { personaName, connection, loggedOn } = useSteamChat();
 
   const panelWidth = Math.min(320, width * 0.84);
+  const connected = connection === 'connected' && loggedOn;
+  const connectionLabel = connected
+    ? 'Connected to Steam'
+    : connection === 'connected'
+      ? 'Signing in…'
+      : connection === 'connecting'
+        ? 'Connecting…'
+        : 'Reconnecting…';
 
-  const handleNavigate = (href: '/friends' | '/chats' | '/groups') => {
+  const handleNavigate = (href: '/friends' | '/chats') => {
     onClose();
     router.navigate(href);
   };
@@ -106,11 +111,16 @@ export function AccountDrawer({ visible, onClose }: AccountDrawerProps) {
           <View style={styles.accountCard}>
             <Text style={styles.accountLabel}>SIGNED IN AS</Text>
             <Text numberOfLines={1} style={styles.accountName}>
-              {accountName ?? 'Steam user'}
+              {personaName ?? accountName ?? 'Steam user'}
             </Text>
+            {personaName && accountName && personaName !== accountName ? (
+              <Text numberOfLines={1} style={styles.accountHandle}>
+                @{accountName}
+              </Text>
+            ) : null}
             <View style={styles.sessionRow}>
-              <View style={styles.sessionDot} />
-              <Text style={styles.sessionLabel}>Steam account</Text>
+              <View style={[styles.sessionDot, !connected && styles.sessionDotPending]} />
+              <Text style={styles.sessionLabel}>{connectionLabel}</Text>
             </View>
           </View>
 
@@ -236,6 +246,12 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     letterSpacing: 0.1,
   },
+  accountHandle: {
+    marginTop: 2,
+    color: SteamColors.muted,
+    fontSize: 12.5,
+    lineHeight: 17,
+  },
   sessionRow: {
     marginTop: 8,
     flexDirection: 'row',
@@ -247,6 +263,9 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: SteamColors.onlineDot,
+  },
+  sessionDotPending: {
+    backgroundColor: SteamColors.unreadDot,
   },
   sessionLabel: {
     color: SteamColors.muted,
