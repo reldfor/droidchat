@@ -1,18 +1,34 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { ChatStoreProvider } from '@/context/chat-store';
+import { SessionProvider } from '@/context/session';
 
-SplashScreen.preventAutoHideAsync();
+const appTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    background: '#292C33',
+    card: '#292C33',
+    border: '#202126',
+    primary: '#216CAD',
+  },
+};
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+export default function RootLayout() {
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <SessionProvider>
+      <ChatStoreProvider>
+        <ThemeProvider value={appTheme}>
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: appTheme.colors.background },
+            }}
+          />
+          <StatusBar style="light" />
+        </ThemeProvider>
+      </ChatStoreProvider>
+    </SessionProvider>
   );
 }

@@ -8,6 +8,7 @@ export function useColorScheme() {
   const [hasHydrated, setHasHydrated] = useState(false);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration flag should only flip once on the client
     setHasHydrated(true);
   }, []);
 
