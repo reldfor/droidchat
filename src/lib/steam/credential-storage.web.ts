@@ -1,6 +1,9 @@
 import { isSteamCredentials, type SteamCredentials } from './credentials';
 
 /**
+ * Legacy single-account storage. It is kept so existing installs can migrate
+ * into `account-storage`; new code should use the multi-account module.
+ *
  * Web has no secure key-value store. Keep the session in localStorage so a
  * reload does not sign the user out; the tokens never leave this origin.
  */

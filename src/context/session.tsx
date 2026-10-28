@@ -10,60 +10,97 @@ import {
 } from 'react';
 import { AppState } from 'react-native';
 
+import { persistStoredAccounts, readStoredAccounts } from '@/lib/steam/account-storage';
+import {
+  mostRecentlyUsed,
+  toSessionAccount,
+  type SessionAccount,
+  type StoredAccount,
+  type StoredAccounts,
+} from '@/lib/steam/accounts';
 import { SteamApiError, generateAccessTokenForApp } from '@/lib/steam/auth-api';
 import { EResult } from '@/lib/steam/constants';
-import {
-  readStoredCredentials,
-  writeStoredCredentials,
-} from '@/lib/steam/credential-storage';
 import type { SteamCredentials } from '@/lib/steam/credentials';
 import { shouldRefreshAccessToken } from '@/lib/steam/jwt';
 
+export type { SessionAccount } from '@/lib/steam/accounts';
 export type { SteamCredentials } from '@/lib/steam/credentials';
 
 type SessionStatus = 'loading' | 'signed-in' | 'signed-out';
 
 type SessionContextValue = {
   status: SessionStatus;
+  /** Credentials for the active account, or `null` when signed out. */
   credentials: SteamCredentials | null;
+  /** Every saved account, active first, then most recently used. */
+  accounts: SessionAccount[];
+  activeAccount: SessionAccount | null;
   accountName: string | null;
+  /** Changes whenever credentials are explicitly replaced, even for the same account. */
+  authRevision: number;
   signIn: (credentials: SteamCredentials) => void;
+  switchAccount: (steamId: string) => void;
+  removeAccount: (steamId: string) => void;
   signOut: () => void;
-  /** Renews the access token when it is close to expiring. */
+  /** Renews the active account's access token when it is close to expiring. */
   refreshSession: () => Promise<void>;
+  updateAccountProfile: (steamId: string, profile: { personaName?: string }) => void;
 };
 
 const SessionContext = createContext<SessionContextValue | null>(null);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<SessionStatus>('loading');
+  const [accounts, setAccounts] = useState<SessionAccount[]>([]);
+  const [activeSteamId, setActiveSteamId] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<SteamCredentials | null>(null);
-  const credentialsRef = useRef<SteamCredentials | null>(null);
-  const refreshingRef = useRef(false);
+  const [authRevision, setAuthRevision] = useState(0);
 
-  const persist = useCallback(async (next: SteamCredentials | null) => {
-    try {
-      await writeStoredCredentials(next);
-    } catch {
-      // Persisting is best-effort: the in-memory session still works.
-    }
+  const storedRef = useRef<StoredAccount[]>([]);
+  const activeSteamIdRef = useRef<string | null>(null);
+  const credentialsRef = useRef<SteamCredentials | null>(null);
+  /** Steam IDs with an access-token refresh currently in flight. */
+  const refreshingRef = useRef(new Set<string>());
+
+  /**
+   * Keep the in-memory graph and the React state in sync. Refs are updated
+   * synchronously so callbacks can use the newest account immediately.
+   */
+  const applyState = useCallback((nextAccounts: StoredAccount[], nextActiveId: string | null) => {
+    storedRef.current = nextAccounts;
+    activeSteamIdRef.current = nextActiveId;
+
+    const active = nextAccounts.find((account) => account.steamId === nextActiveId) ?? null;
+
+    credentialsRef.current = active?.credentials ?? null;
+    setAccounts(nextAccounts.map(toSessionAccount));
+    setActiveSteamId(nextActiveId);
+    setCredentials(active?.credentials ?? null);
+    setStatus(active ? 'signed-in' : 'signed-out');
   }, []);
 
-  const signOut = useCallback(() => {
-    credentialsRef.current = null;
-    setCredentials(null);
-    setStatus('signed-out');
-    void persist(null);
-  }, [persist]);
+  const persist = useCallback(() => {
+    const state: StoredAccounts = {
+      accounts: storedRef.current,
+      activeSteamId: activeSteamIdRef.current,
+    };
+
+    // Persisting is best-effort: the in-memory session still works.
+    void persistStoredAccounts(state).catch(() => {});
+  }, []);
 
   const refreshSession = useCallback(async () => {
     const current = credentialsRef.current;
 
-    if (!current || refreshingRef.current || !shouldRefreshAccessToken(current.accessToken)) {
+    if (
+      !current ||
+      refreshingRef.current.has(current.steamId) ||
+      !shouldRefreshAccessToken(current.accessToken)
+    ) {
       return;
     }
 
-    refreshingRef.current = true;
+    refreshingRef.current.add(current.steamId);
 
     try {
       const result = await generateAccessTokenForApp({
@@ -76,21 +113,37 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // The session may have been replaced (or signed out) while the request
-      // was in flight; never clobber the newer credentials.
-      if (credentialsRef.current !== current) {
+      const stored = storedRef.current.find((account) => account.steamId === current.steamId);
+
+      if (!stored || stored.credentials !== current) {
+        // The account was removed or signed in again while the request was in
+        // flight; never overwrite the newer credentials.
         return;
       }
 
-      const next: SteamCredentials = {
+      const nextCredentials: SteamCredentials = {
         ...current,
         accessToken: result.accessToken,
         refreshToken: result.refreshToken || current.refreshToken,
       };
+      const nextAccounts = storedRef.current.map((account) =>
+        account.steamId === current.steamId
+          ? { ...account, credentials: nextCredentials }
+          : account,
+      );
 
-      credentialsRef.current = next;
-      setCredentials(next);
-      void persist(next);
+      storedRef.current = nextAccounts;
+      setAccounts(nextAccounts.map(toSessionAccount));
+
+      // The user may have switched accounts while the request was in flight.
+      // The refreshed token is still useful for the saved account, but only
+      // the active account may update the live credentials.
+      if (activeSteamIdRef.current === current.steamId) {
+        credentialsRef.current = nextCredentials;
+        setCredentials(nextCredentials);
+      }
+
+      persist();
     } catch (error) {
       // The app only logs a failed refresh and keeps the stored credentials, so
       // the same session can be retried later. `AccessDenied` is deliberately
@@ -104,32 +157,52 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           error.eresult === EResult.AccountDisabled ||
           error.eresult === EResult.AccountNotFound)
       ) {
-        signOut();
+        const stored = storedRef.current.find(
+          (account) => account.steamId === current.steamId,
+        );
+
+        if (!stored || stored.credentials !== current) {
+          return;
+        }
+
+        const remaining = storedRef.current.filter(
+          (account) => account.steamId !== current.steamId,
+        );
+        const nextActiveId =
+          activeSteamIdRef.current === current.steamId
+            ? (mostRecentlyUsed(remaining)?.steamId ?? null)
+            : activeSteamIdRef.current;
+
+        applyState(remaining, nextActiveId);
+        persist();
       }
     } finally {
-      refreshingRef.current = false;
+      refreshingRef.current.delete(current.steamId);
     }
-  }, [persist, signOut]);
+  }, [applyState, persist]);
 
   useEffect(() => {
     let cancelled = false;
 
     const restore = async () => {
       try {
-        const stored = await readStoredCredentials();
+        const stored = await readStoredAccounts();
 
         if (cancelled) {
           return;
         }
 
-        if (stored) {
-          credentialsRef.current = stored;
-          setCredentials(stored);
-          setStatus('signed-in');
-          void refreshSession();
-        } else {
+        if (stored.accounts.length === 0) {
           setStatus('signed-out');
+          return;
         }
+
+        const active =
+          stored.accounts.find((account) => account.steamId === stored.activeSteamId) ??
+          mostRecentlyUsed(stored.accounts);
+
+        applyState(stored.accounts, active?.steamId ?? null);
+        void refreshSession();
       } catch {
         if (!cancelled) {
           setStatus('signed-out');
@@ -142,7 +215,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshSession]);
+  }, [applyState, refreshSession]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (next) => {
@@ -166,24 +239,150 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback(
     (next: SteamCredentials) => {
-      credentialsRef.current = next;
-      setCredentials(next);
-      setStatus('signed-in');
-      void persist(next);
+      const now = Date.now();
+      const existing = storedRef.current.find((account) => account.steamId === next.steamId);
+      const account: StoredAccount = {
+        steamId: next.steamId,
+        accountName: next.accountName,
+        personaName: existing?.personaName ?? null,
+        addedAt: existing?.addedAt ?? now,
+        lastUsedAt: now,
+        credentials: next,
+      };
+      const nextAccounts = [
+        account,
+        ...storedRef.current.filter((entry) => entry.steamId !== next.steamId),
+      ];
+
+      applyState(nextAccounts, next.steamId);
+      setAuthRevision((current) => current + 1);
+      persist();
+    },
+    [applyState, persist],
+  );
+
+  const switchAccount = useCallback(
+    (steamId: string) => {
+      if (steamId === activeSteamIdRef.current) {
+        return;
+      }
+
+      const target = storedRef.current.find((account) => account.steamId === steamId);
+
+      if (!target) {
+        return;
+      }
+
+      const now = Date.now();
+      const nextAccounts = storedRef.current.map((account) =>
+        account.steamId === steamId ? { ...account, lastUsedAt: now } : account,
+      );
+
+      applyState(nextAccounts, steamId);
+      persist();
+      void refreshSession();
+    },
+    [applyState, persist, refreshSession],
+  );
+
+  const removeAccount = useCallback(
+    (steamId: string) => {
+      if (!storedRef.current.some((account) => account.steamId === steamId)) {
+        return;
+      }
+
+      const remaining = storedRef.current.filter((account) => account.steamId !== steamId);
+      const nextActiveId =
+        activeSteamIdRef.current === steamId
+          ? (mostRecentlyUsed(remaining)?.steamId ?? null)
+          : activeSteamIdRef.current;
+
+      applyState(remaining, nextActiveId);
+      persist();
+    },
+    [applyState, persist],
+  );
+
+  const signOut = useCallback(() => {
+    const activeId = activeSteamIdRef.current;
+
+    if (activeId) {
+      removeAccount(activeId);
+    }
+  }, [removeAccount]);
+
+  const updateAccountProfile = useCallback(
+    (steamId: string, profile: { personaName?: string }) => {
+      const personaName = profile.personaName?.trim();
+
+      if (!steamId || !personaName) {
+        return;
+      }
+
+      const account = storedRef.current.find((entry) => entry.steamId === steamId);
+
+      if (!account || account.personaName === personaName) {
+        return;
+      }
+
+      const nextAccounts = storedRef.current.map((entry) =>
+        entry.steamId === steamId ? { ...entry, personaName } : entry,
+      );
+
+      storedRef.current = nextAccounts;
+      setAccounts(nextAccounts.map(toSessionAccount));
+      persist();
     },
     [persist],
+  );
+
+  const sortedAccounts = useMemo(() => {
+    return [...accounts].sort((a, b) => {
+      if (a.steamId === activeSteamId) {
+        return -1;
+      }
+
+      if (b.steamId === activeSteamId) {
+        return 1;
+      }
+
+      return b.lastUsedAt - a.lastUsedAt;
+    });
+  }, [accounts, activeSteamId]);
+
+  const activeAccount = useMemo(
+    () => sortedAccounts.find((account) => account.steamId === activeSteamId) ?? null,
+    [activeSteamId, sortedAccounts],
   );
 
   const value = useMemo<SessionContextValue>(
     () => ({
       status,
       credentials,
+      accounts: sortedAccounts,
+      activeAccount,
       accountName: credentials?.accountName ?? null,
+      authRevision,
       signIn,
+      switchAccount,
+      removeAccount,
       signOut,
       refreshSession,
+      updateAccountProfile,
     }),
-    [credentials, refreshSession, signIn, signOut, status],
+    [
+      activeAccount,
+      authRevision,
+      credentials,
+      refreshSession,
+      removeAccount,
+      signIn,
+      signOut,
+      sortedAccounts,
+      status,
+      switchAccount,
+      updateAccountProfile,
+    ],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

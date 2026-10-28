@@ -2,6 +2,10 @@ import * as SecureStore from 'expo-secure-store';
 
 import { isSteamCredentials, type SteamCredentials } from './credentials';
 
+/**
+ * Legacy single-account storage. It is kept so existing installs can migrate
+ * into `account-storage`; new code should use the multi-account module.
+ */
 const STORAGE_PREFIX = 'steam.credentials.v1';
 
 /**

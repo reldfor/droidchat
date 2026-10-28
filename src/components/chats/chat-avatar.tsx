@@ -7,6 +7,8 @@ type ChatAvatarProps = {
   background?: string;
   name?: string;
   rounded?: boolean;
+  /** Stable value for the fallback color, so a renamed persona keeps its color. */
+  seed?: string;
   size: number;
   uri?: string | null;
 };
@@ -27,12 +29,19 @@ function fallbackColor(name: string | undefined): string {
   return fallbackColors[hash % fallbackColors.length];
 }
 
-export function ChatAvatar({ background, name, rounded = false, size, uri }: ChatAvatarProps) {
+export function ChatAvatar({
+  background,
+  name,
+  rounded = false,
+  seed,
+  size,
+  uri,
+}: ChatAvatarProps) {
   const frameStyle = {
     width: size,
     height: size,
     borderRadius: rounded ? size / 2 : 2,
-    backgroundColor: background ?? fallbackColor(name),
+    backgroundColor: background ?? fallbackColor(seed ?? name),
   };
 
   return (
