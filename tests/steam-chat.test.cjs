@@ -465,6 +465,16 @@ test('expired/replaced sessions and oversized files cannot start uploads', async
   assert.equal(requests, 0);
 });
 
+function accountStorageMock(persisted) {
+  return {
+    readStoredAccounts: async () => ({ accounts: [], activeSteamId: null }),
+    persistStoredAccounts: async (state) => {
+      const active = state.accounts.find((account) => account.steamId === state.activeSteamId);
+      persisted.push(active ? active.credentials : null);
+    },
+  };
+}
+
 test('an upload waits for an already-running access-token refresh', async () => {
   let finishRefresh;
   let refreshes = 0;
@@ -481,7 +491,7 @@ test('an upload waits for an already-running access-token refresh', async () => 
   const { SessionProvider } = loadSource('src/context/session.tsx', {
     react: hooks,
     '@/lib/steam/auth-api': { SteamApiError: class extends Error {}, generateAccessTokenForApp: () => { refreshes += 1; return pendingRefresh; } },
-    '@/lib/steam/credential-storage': { writeStoredCredentials: async () => {}, readStoredCredentials: async () => null },
+    '@/lib/steam/account-storage': accountStorageMock([]),
     '@/lib/steam/jwt': { shouldRefreshAccessToken: (token) => token === 'expired' },
   });
   const session = SessionProvider({ children: null }).props.value;
@@ -517,7 +527,7 @@ function sessionFixture(httpRefresh = async () => { throw new Error('HTTP refres
   const { SessionProvider } = loadSource('src/context/session.tsx', {
     react: hooks,
     '@/lib/steam/auth-api': { SteamApiError: class extends Error {}, generateAccessTokenForApp: httpRefresh },
-    '@/lib/steam/credential-storage': { writeStoredCredentials: async (value) => { persisted.push(value); }, readStoredCredentials: async () => null },
+    '@/lib/steam/account-storage': accountStorageMock(persisted),
   });
   const session = SessionProvider({ children: null }).props.value;
   session.signIn({ steamId: self, accountName: 'test', accessToken: accessJwt(true), refreshToken: 'mobile-chat-refresh', guardData: '' });
@@ -679,6 +689,48 @@ test('a failed CM refresh is surfaced and an expired result is never persisted',
   await assert.rejects(session.getAccessToken(async () => { throw new Error('CM token denied'); }), /CM token denied/);
   await assert.rejects(session.getAccessToken(async () => ({ accessToken: accessJwt(true), refreshToken: 'bad-refresh' })), /could not refresh/);
   assert.equal(persisted.length, 1);
+});
+
+test('switching accounts persists every saved sign-in and the MRU fallback', () => {
+  const states = [];
+  const storage = {
+    readStoredAccounts: async () => ({ accounts: [], activeSteamId: null }),
+    persistStoredAccounts: async (state) => { states.push(state); },
+  };
+  const hooks = {
+    ...React,
+    createContext: () => ({ Provider: 'session-provider' }),
+    useState: (initial) => [initial, () => {}],
+    useRef: (initial) => ({ current: initial }),
+    useCallback: (callback) => callback,
+    useMemo: (factory) => factory(),
+    useEffect: () => {},
+  };
+  const { SessionProvider } = loadSource('src/context/session.tsx', {
+    react: hooks,
+    '@/lib/steam/auth-api': { SteamApiError: class extends Error {}, generateAccessTokenForApp: async () => ({ accessToken: 'unused', refreshToken: '' }) },
+    '@/lib/steam/account-storage': storage,
+    '@/lib/steam/jwt': { shouldRefreshAccessToken: () => false },
+  });
+  const session = SessionProvider({ children: null }).props.value;
+
+  session.signIn({ steamId: self, accountName: 'first', accessToken: 'one', refreshToken: 'first-refresh', guardData: '' });
+  session.signIn({ steamId: friend, accountName: 'second', accessToken: 'two', refreshToken: 'second-refresh', guardData: '' });
+  assert.equal(states.at(-1).accounts.length, 2);
+  assert.equal(states.at(-1).activeSteamId, friend);
+
+  session.updateAccountProfile(friend, { personaName: 'Second Persona' });
+  assert.equal(states.at(-1).accounts.find((account) => account.steamId === friend).personaName, 'Second Persona');
+
+  session.switchAccount(self);
+  assert.equal(states.at(-1).activeSteamId, self);
+  assert.equal(states.at(-1).accounts.find((account) => account.steamId === self).lastUsedAt >= states[0].accounts.find((account) => account.steamId === self).lastUsedAt, true);
+
+  // Signing out removes only the active account; the other one opens instead.
+  session.signOut();
+  assert.equal(states.at(-1).activeSteamId, friend);
+  assert.equal(states.at(-1).accounts.length, 1);
+  assert.equal(states.at(-1).accounts[0].credentials.refreshToken, 'second-refresh');
 });
 
 test('a rejected commit is uncertain and is never automatically sent a second time', async (t) => {

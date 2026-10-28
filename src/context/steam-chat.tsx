@@ -760,12 +760,15 @@ type SteamChatContextValue = SteamChatState & {
 const SteamChatContext = createContext<SteamChatContextValue | null>(null);
 
 export function SteamChatProvider({ children }: { children: ReactNode }) {
-  const { status, credentials, getWebAccessToken } = useSession();
+  const { status, credentials, authRevision, getWebAccessToken, updateAccountProfile } =
+    useSession();
   const [state, dispatch] = useReducer(reduce, initialState);
 
   const credentialsRef = useRef(credentials);
   const stateRef = useRef(state);
   const clientRef = useRef<SteamCmClient | null>(null);
+  /** Identifies the client allowed to mutate state; blocks late events after switches. */
+  const clientTokenRef = useRef<symbol | null>(null);
   const personaFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typingTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const typingSentAt = useRef(new Map<string, number>());
@@ -788,12 +791,18 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       personaFallbackTimer.current = null;
     }
 
-    if (steamIds.length === 0) {
+    const clientToken = clientTokenRef.current;
+
+    if (steamIds.length === 0 || !clientToken) {
       return;
     }
 
     personaFallbackTimer.current = setTimeout(() => {
       personaFallbackTimer.current = null;
+
+      if (clientTokenRef.current !== clientToken) {
+        return;
+      }
 
       const missing = steamIds.filter((steamId) => {
         const friend = stateRef.current.friends[steamId];
@@ -808,9 +817,10 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
 
   const loadConversation = useCallback((steamId: string, force = false) => {
     const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
     const conversation = stateRef.current.conversations[steamId];
 
-    if (!client || !client.isLoggedOn) {
+    if (!client || !clientToken || !client.isLoggedOn) {
       return;
     }
 
@@ -823,7 +833,10 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
     void client
       .getRecentMessages(steamId, { count: INITIAL_MESSAGE_COUNT })
       .then((response) => {
-        if (clientRef.current !== client) return;
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
         dispatch({
           type: 'loaded',
           steamId,
@@ -832,16 +845,27 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
         });
       })
       .catch((error: unknown) => {
-        if (clientRef.current !== client) return;
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
         dispatch({ type: 'load-error', steamId, error: describeError(error) });
       });
   }, []);
 
   const loadMore = useCallback((steamId: string) => {
     const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
     const conversation = stateRef.current.conversations[steamId];
 
-    if (!client || !client.isLoggedOn || !conversation || conversation.loading || !conversation.hasMore) {
+    if (
+      !client ||
+      !clientToken ||
+      !client.isLoggedOn ||
+      !conversation ||
+      conversation.loading ||
+      !conversation.hasMore
+    ) {
       return;
     }
 
@@ -854,7 +878,10 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
         ordinalLast: conversation.oldestOrdinal,
       })
       .then((response) => {
-        if (clientRef.current !== client) return;
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
         dispatch({
           type: 'loaded',
           steamId,
@@ -863,15 +890,19 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
         });
       })
       .catch((error: unknown) => {
-        if (clientRef.current !== client) return;
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
         dispatch({ type: 'load-error', steamId, error: describeError(error) });
       });
   }, []);
 
   const loadPreviews = useCallback(async (sessions: MessageSession[]) => {
     const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
 
-    if (!client) {
+    if (!client || !clientToken) {
       return;
     }
 
@@ -880,7 +911,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       .slice(0, MAX_PREVIEWS);
 
     for (const session of recent) {
-      if (!client.isLoggedOn || clientRef.current !== client) {
+      if (!client.isLoggedOn || clientTokenRef.current !== clientToken) {
         return;
       }
 
@@ -893,7 +924,11 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
 
       try {
         const response = await client.getRecentMessages(steamId, { count: 1 });
-        if (clientRef.current !== client) return;
+
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
         const last = response.messages[response.messages.length - 1];
 
         if (!last) {
@@ -945,10 +980,11 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
 
   const sendMessage = useCallback(async (steamId: string, text: string) => {
     const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
     const trimmed = text.trim();
     const selfSteamId = stateRef.current.selfSteamId;
 
-    if (!client?.isLoggedOn || !selfSteamId) {
+    if (!client?.isLoggedOn || !clientToken || !selfSteamId) {
       throw new Error('Reconnect to Steam before sending a message.');
     }
     if (!trimmed) return;
@@ -973,10 +1009,29 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
 
     try {
       const response = await client.sendMessage(steamId, trimmed, clientMessageId);
-      dispatch({ type: 'send-ok', steamId, id, timestamp: response.serverTimestamp, ordinal: response.ordinal });
+
+      if (clientTokenRef.current !== clientToken) {
+        return;
+      }
+
+      dispatch({
+        type: 'send-ok',
+        steamId,
+        id,
+        timestamp: response.serverTimestamp,
+        ordinal: response.ordinal,
+      });
     } catch (error) {
-      const confirmed = stateRef.current.conversations[steamId]?.messages.find((message) => message.id === id && !message.pending && !message.failed);
+      if (clientTokenRef.current !== clientToken) {
+        return;
+      }
+
+      const confirmed = stateRef.current.conversations[steamId]?.messages.find(
+        (message) => message.id === id && !message.pending && !message.failed,
+      );
+
       if (confirmed) return;
+
       dispatch({ type: 'send-failed', steamId, id });
       throw new Error(describeError(error));
     }
@@ -1120,6 +1175,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (status !== 'signed-in' || !steamId || !accountName) {
+      clientTokenRef.current = null;
       clientRef.current?.stop();
       clientRef.current = null;
       dispatch({ type: 'reset' });
@@ -1129,19 +1185,39 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
     // Captured once: these maps live for the lifetime of the provider.
     const typingTimerMap = typingTimers.current;
     const typingSentMap = typingSentAt.current;
+    const clientToken = Symbol('steam-client');
+
+    const handleClientEvent = (event: SteamCmEvent) => {
+      if (clientTokenRef.current !== clientToken) {
+        return;
+      }
+
+      handleEvent(event);
+
+      // Bind the profile to this client's account: a late event from a client
+      // that is being replaced must not rename the newly active account.
+      if (event.type === 'account-info') {
+        updateAccountProfile(steamId, { personaName: event.info.personaName });
+      }
+    };
 
     const client = new SteamCmClient({
       steamId,
       accountName,
       getRefreshToken: () => credentialsRef.current?.refreshToken ?? '',
-      onEvent: handleEvent,
+      onEvent: handleClientEvent,
     });
 
+    clientTokenRef.current = clientToken;
     clientRef.current = client;
     dispatch({ type: 'reset' });
     client.start();
 
     return () => {
+      if (clientTokenRef.current === clientToken) {
+        clientTokenRef.current = null;
+      }
+
       client.stop();
 
       if (personaFallbackTimer.current) {
@@ -1160,7 +1236,15 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
         clientRef.current = null;
       }
     };
-  }, [status, steamId, accountName, handleEvent, generation]);
+  }, [
+    status,
+    steamId,
+    accountName,
+    authRevision,
+    handleEvent,
+    generation,
+    updateAccountProfile,
+  ]);
 
   useEffect(() => {
     let backgroundedAt = 0;
