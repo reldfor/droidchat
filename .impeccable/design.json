@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-27T14:51:46.952Z",
+  "title": "Design System: Droidchat",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Conversation charcoal"
+      },
+      "canvas-raised": {
+        "role": "neutral",
+        "displayName": "Raised conversation surface"
+      },
+      "chrome": {
+        "role": "neutral",
+        "displayName": "Header charcoal"
+      },
+      "chrome-deep": {
+        "role": "neutral",
+        "displayName": "Deep chrome"
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Pale content"
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Secondary gray"
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Steam action blue"
+      },
+      "accent-deep": {
+        "role": "primary",
+        "displayName": "Filled action blue"
+      },
+      "error": {
+        "role": "error",
+        "displayName": "Failure coral"
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Conversation body",
+        "purpose": "Message and composer text; native platform family."
+      },
+      "label": {
+        "displayName": "Secondary label",
+        "purpose": "Supporting labels and search text."
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Send action",
+      "kind": "button",
+      "refersTo": "button-send",
+      "description": "Semantic HTML translation of the native filled action; the app uses an upward-arrow SymbolView.",
+      "html": "<button class=\"ds-send\" aria-label=\"Send message\"><svg viewBox=\"0 0 24 24\" width=\"22\" height=\"22\" aria-hidden=\"true\"><path d=\"M12 19V5m-7 7 7-7 7 7\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/></svg></button>",
+      "css": ".ds-send{width:44px;height:48px;border:0;border-radius:4px;background:#216CAD;color:#F1F3F5;display:inline-flex;align-items:center;justify-content:center}.ds-send:hover,.ds-send:active{background:#195E96}.ds-send:focus-visible{outline:2px solid #66C0F4;outline-offset:2px}.ds-send:disabled{opacity:.42}"
+    },
+    {
+      "name": "Media action",
+      "kind": "button",
+      "refersTo": "button-media",
+      "description": "Unfilled media control with a native symbol and explicit accessibility label.",
+      "html": "<button class=\"ds-media\" aria-label=\"Attach image\"><svg viewBox=\"0 0 24 24\" width=\"23\" height=\"23\" aria-hidden=\"true\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"1\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"/><path d=\"m5 17 4-5 4 4 3-3 3 4\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"/></svg></button>",
+      "css": ".ds-media{width:44px;height:48px;border:0;border-radius:4px;background:transparent;color:#C3CAD1;display:inline-flex;align-items:center;justify-content:center}.ds-media:hover,.ds-media:active{opacity:.6}.ds-media:focus-visible{outline:2px solid #66C0F4;outline-offset:2px}.ds-media:disabled{opacity:.42}"
+    },
+    {
+      "name": "Message field",
+      "kind": "input",
+      "refersTo": "input-message",
+      "description": "Flexible raised composer field. HTML snippets are panel translations, not additional native implementation.",
+      "html": "<input class=\"ds-message\" aria-label=\"Message\" placeholder=\"Message\"/>",
+      "css": ".ds-message{height:48px;max-width:100%;padding:0 10px;border:0;border-radius:4px;background:#26282E;color:#DDE1E5;font:15.5px/20px system-ui}.ds-message::placeholder{color:#8D949D}.ds-message:focus-visible{outline:2px solid #66C0F4;outline-offset:2px}.ds-message:disabled{opacity:.42}"
+    },
+    {
+      "name": "Emoticon search",
+      "kind": "input",
+      "description": "Compact search field used above the six-column emoticon collection.",
+      "html": "<input class=\"ds-search\" aria-label=\"Search Steam emoticons\" placeholder=\"Search emoticons\"/>",
+      "css": ".ds-search{height:42px;padding:0 12px;border:0;border-radius:4px;background:#26282E;color:#DDE1E5;font:14px system-ui}.ds-search::placeholder{color:#8D949D}.ds-search:focus-visible{outline:2px solid #66C0F4;outline-offset:2px}"
+    },
+    {
+      "name": "Incoming message",
+      "kind": "custom",
+      "description": "A raised bubble with an author-side lower corner and subordinate timestamp.",
+      "html": "<div class=\"ds-incoming\"><div class=\"ds-incoming-bubble\">A message</div><span class=\"ds-time\">21:41</span></div>",
+      "css": ".ds-incoming{display:flex;flex-direction:column;align-items:flex-start;gap:4px}.ds-incoming-bubble{max-width:78%;padding:9px 12px;border-radius:9px 9px 9px 2px;background:#26282E;color:#F2F7FB;font:15.5px/21px system-ui}.ds-time{color:#8D949D;font:10.5px/14px system-ui}"
+    },
+    {
+      "name": "Outgoing message",
+      "kind": "custom",
+      "description": "The blue counterpart aligned to the author side.",
+      "html": "<div class=\"ds-outgoing\"><div class=\"ds-outgoing-bubble\">A message</div><span class=\"ds-time\">21:41</span></div>",
+      "css": ".ds-outgoing{display:flex;flex-direction:column;align-items:flex-end;gap:4px}.ds-outgoing-bubble{max-width:78%;padding:9px 12px;border-radius:9px 9px 2px 9px;background:#216CAD;color:#F2F7FB;font:15.5px/21px system-ui}.ds-time{color:#8D949D;font:10.5px/14px system-ui}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Existing Steam-style chat",
+    "overview": "This is a record of the incumbent interface, not a new visual identity. The app is a dark, mobile-first tool for conversation: restrained chrome, a flexible message area, and compact controls anchored below it. The media additions inherit that system.",
+    "keyCharacteristics": [
+      "Charcoal tonal layers with blue actions and pale content.",
+      "Native platform body typography and familiar symbol icons.",
+      "Small control corners, square avatars, and directional message bubbles.",
+      "Visible loading, disabled, failure, empty, and recovery states."
+    ],
+    "rules": [
+      {
+        "name": "The Semantic Color Rule",
+        "body": "Reuse `SteamColors` for shared roles. The light accent marks links and selected controls; the deeper accent fills Send and outgoing bubbles. Muted text carries secondary information, not the main message.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Do preserve the existing token palette and compact mobile control geometry.",
+      "Do preserve native accessibility labels, touch targets, and safe-area spacing.",
+      "Do keep readable text when an image or emoticon cannot load."
+    ],
+    "donts": [
+      "Don't turn a local composer feature into a new visual identity.",
+      "Don't replace symbol controls with decorative emoji or text glyphs.",
+      "Don't treat synthetic web-preview content as product or native-device evidence."
+    ]
+  }
+}
