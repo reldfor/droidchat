@@ -34,6 +34,11 @@ type SessionContextValue = {
   refreshSession: () => Promise<void>;
   /** A supplied CM refresher forces a fresh, persisted upload cookie token. */
   getAccessToken: (refreshTokens?: TokenRefresher) => Promise<string>;
+  /**
+   * Forces a new website-scoped access token for Community requests, even if
+   * the cached token has not expired locally.
+   */
+  getWebAccessToken: () => Promise<string>;
 };
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -95,7 +100,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         const result = await refreshTokens({
           refreshToken: current.refreshToken,
           steamId: current.steamId,
-          accessToken: current.accessToken,
         });
 
         if (!result.accessToken || shouldRefreshAccessToken(result.accessToken)) {
@@ -217,6 +221,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return current.accessToken;
   }, [refreshAccessToken]);
 
+  const getWebAccessToken = useCallback(async () => {
+    const account = credentialsRef.current?.steamId;
+    // Always go through the auth service, including when the persisted token
+    // was derived over the CM by an older build.
+    await refreshAccessToken(generateAccessTokenForApp, true);
+    const current = credentialsRef.current;
+    if (!current?.accessToken) throw new Error('Sign in to Steam before uploading an image.');
+    if (current.steamId !== account) throw new Error('Your Steam session changed. Choose the image again.');
+    if (shouldRefreshAccessToken(current.accessToken)) throw new Error('Steam could not refresh the image upload session. Try again.');
+    return current.accessToken;
+  }, [refreshAccessToken]);
+
   const value = useMemo<SessionContextValue>(
     () => ({
       status,
@@ -226,8 +242,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       signOut,
       refreshSession,
       getAccessToken,
+      getWebAccessToken,
     }),
-    [credentials, refreshSession, getAccessToken, signIn, signOut, status],
+    [credentials, refreshSession, getAccessToken, getWebAccessToken, signIn, signOut, status],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

@@ -9,10 +9,15 @@ export const STEAM_WEBAPI_BASE_URL = 'https://api.steampowered.com/';
 export const STEAM_LOGIN_BASE_URL = 'https://login.steampowered.com/';
 
 /**
- * `Config.WEBSITE_ID` is never overwritten by the mobile build, so the app
- * sends the default value of the base `Config` object.
+ * Website ID sent with `BeginAuthSessionViaCredentials`.
+ *
+ * Steam scopes some issued sessions by website. The mobile app platform uses
+ * `Mobile` (node-steam-session and aiosteampy both send this), while `Unknown`
+ * is the default the Steam client uses. The legacy APK only exercised the old
+ * `ClientLogOn` path, so its `Config.WEBSITE_ID` default does not apply to the
+ * modern auth-session flow.
  */
-export const STEAM_WEBSITE_ID = 'Unknown';
+export const STEAM_WEBSITE_ID = 'Mobile';
 
 /** `qos_level` default in `CAuthentication_BeginAuthSessionViaCredentials_Request`. */
 export const STEAM_QOS_LEVEL = 2;

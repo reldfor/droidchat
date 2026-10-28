@@ -10,9 +10,9 @@
  * raw protobuf bodies; the `EResult` for the call travels in the `x-eresult`
  * HTTP header (and `x-error_message` when the call fails).
  *
- * Signing in is fully anonymous. Token refresh is not: the app sends it over
- * its authenticated CM transport, so over HTTP it needs the current access
- * token as an `access_token` query parameter to be routed at all.
+ * Signing in is fully anonymous. `GenerateAccessTokenForApp` is authenticated
+ * by the refresh token in the request body, so it must not also be routed by
+ * the (possibly expired) access token in the query string.
  */
 
 import { bytesToBase64, base64ToBytes } from './bytes';
@@ -347,14 +347,13 @@ export type GenerateAccessTokenResult = {
  * Request: refresh_token=1, steamid=2 (fixed64), renewal_type=3.
  * Response: access_token=1, refresh_token=2.
  *
- * The app sends this over its authenticated CM transport. Over the WebAPI the
- * call is routed by the current access token, which has to travel in the query
- * string; without it Steam answers "Missing required routing parameter".
+ * The refresh token authenticates the call by itself. Passing a cached access
+ * token as the WebAPI routing parameter makes Steam reject the request once
+ * that token has expired — even though the refresh token is still valid.
  */
 export async function generateAccessTokenForApp(params: {
   refreshToken: string;
   steamId: string;
-  accessToken: string;
   renewalType?: number;
 }): Promise<GenerateAccessTokenResult> {
   const request = new ProtoWriter()
@@ -365,7 +364,7 @@ export async function generateAccessTokenForApp(params: {
   const response = await callService(
     'Authentication.GenerateAccessTokenForApp#1',
     request.finish(),
-    { method: 'POST', accessToken: params.accessToken },
+    { method: 'POST' },
   );
 
   if (response.eresult !== EResult.OK) {

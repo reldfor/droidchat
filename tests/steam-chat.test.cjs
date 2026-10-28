@@ -360,13 +360,16 @@ test('uploads binary bytes and commits directly to the friend without leaking lo
   });
   assert.equal(await uploadChatImage(uploadCredentials, friend, testImage), steamImageUrl);
   assert.equal(calls.length, 3);
-  // APK #9265 sets CHAT_BASE_URL; #19574 / #26258 build this request.
-  assert.equal(calls[0].url, 'https://steam-chat.com/chat/beginfileupload/?l=english');
+  // Steam's web chat uses the Community origin for CHAT_BASE_URL.
+  assert.equal(calls[0].url, 'https://steamcommunity.com/chat/beginfileupload/?l=english');
   const begin = calls[0].options;
   assert.match(begin.headers.Cookie, /steamLoginSecure=76561197960265729%7C%7Ctest-access-token/);
+  assert.equal(begin.headers.Origin, 'https://steamcommunity.com');
+  assert.equal(begin.headers.Referer, 'https://steamcommunity.com/chat/');
   assert.equal(begin.credentials, 'omit');
   assert.equal(begin.redirect, 'error');
   assert.equal(begin.body.get('sessionid'), uploadCredentials.sessionId);
+  assert.match(begin.body.get('file_name'), /^\d+_test\.png$/);
   assert.equal(begin.body.get('file_sha'), testImage.sha1);
   assert.equal(begin.body.get('file_size'), '4');
   assert.equal(calls[1].options.method, 'PUT');
@@ -375,7 +378,7 @@ test('uploads binary bytes and commits directly to the friend without leaking lo
   assert.equal(calls[1].options.credentials, 'omit');
   assert.equal(calls[1].options.redirect, 'error');
   const commit = calls[2].options;
-  assert.equal(calls[2].url, 'https://steam-chat.com/chat/commitfileupload/');
+  assert.equal(calls[2].url, 'https://steamcommunity.com/chat/commitfileupload/');
   assert.equal(commit.headers.Cookie, begin.headers.Cookie);
   assert.equal(commit.body.get('friend_steamid'), friend);
   assert.equal(commit.body.get('ugcid'), '18446744073709551614');
@@ -408,6 +411,18 @@ test('begin failures preserve HTTP/authentication/invalid-response diagnostics a
       assert.equal(requests, 1);
     });
   }
+});
+
+test('a rejected session surfaces Steam\'s reason without echoing the cookie token', async (t) => {
+  t.mock.method(global, 'fetch', async () => Response.json(
+    { success: 21, message: 'Not Logged on.' },
+    { status: 401 },
+  ));
+  await assert.rejects(uploadChatImage(uploadCredentials, friend, testImage), (error) => {
+    assert.match(error.message, /HTTP 401\): Not Logged on\./);
+    assert.ok(!error.message.includes(uploadCredentials.accessToken));
+    return true;
+  });
 });
 
 test('a failed begin connection is retryable and does not attempt PUT or commit', async (t) => {
@@ -509,6 +524,16 @@ function sessionFixture(httpRefresh = async () => { throw new Error('HTTP refres
   return { session, persisted };
 }
 
+test('media tokens always come from the auth service, even when the cached token is fresh', async () => {
+  const fresh = accessJwt(false, 'web-fresh');
+  const { session, persisted } = sessionFixture(async () => ({ accessToken: fresh, refreshToken: 'rotated-refresh' }));
+  const cached = accessJwt(false, 'client-scoped');
+  session.signIn({ steamId: self, accountName: 'test', accessToken: cached, refreshToken: 'mobile-chat-refresh', guardData: '' });
+  assert.equal(await session.getWebAccessToken(), fresh);
+  assert.equal(persisted.at(-1).accessToken, fresh);
+  assert.equal(persisted.at(-1).refreshToken, 'rotated-refresh');
+});
+
 test('CM token generation uses the authenticated service and fixed64 SteamID', async (t) => {
   const { client, sent } = setup(t);
   const pending = client.generateAccessTokenForApp('mobile-chat-refresh');
@@ -521,6 +546,27 @@ test('CM token generation uses the authenticated service and fixed64 SteamID', a
   const token = accessJwt();
   await reply(client, sent[0], new ProtoWriter().string(1, token).string(2, 'rotated-refresh').finish());
   assert.deepEqual(await pending, { accessToken: token, refreshToken: 'rotated-refresh' });
+});
+
+test('HTTP token refresh is authenticated by the refresh token, not the cached access token', async (t) => {
+  const { generateAccessTokenForApp } = loadSource('src/lib/steam/auth-api.ts', {}, new Map());
+  const calls = [];
+  const fresh = accessJwt(false, 'http-fresh');
+  t.mock.method(global, 'fetch', async (url, options) => {
+    calls.push({ url: String(url), options });
+    return new Response(
+      new ProtoWriter().string(1, fresh).string(2, 'rotated-refresh').finish(),
+      { status: 200, headers: { 'x-eresult': '1' } },
+    );
+  });
+  const result = await generateAccessTokenForApp({ refreshToken: 'mobile-refresh', steamId: self });
+  assert.deepEqual(result, { accessToken: fresh, refreshToken: 'rotated-refresh' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.steampowered.com/IAuthenticationService/GenerateAccessTokenForApp/v1/');
+  const fields = readMessage(new Uint8Array(Buffer.from(calls[0].options.body.get('input_protobuf_encoded'), 'base64')));
+  assert.equal(Buffer.from(firstOf(fields, 1).value).toString(), 'mobile-refresh');
+  assert.equal(asUint64String(firstOf(fields, 2)), self);
+  assert.equal(Number(firstOf(fields, 3).value), 1);
 });
 
 test('CM token rejection and a missing access token never fall back to cached cookies', async (t) => {
@@ -541,7 +587,7 @@ test('a failed access-token refresh cannot return the expired cookie token', asy
   assert.equal(persisted[0].accessToken, expired);
 });
 
-test('image upload derives and persists a CM token even when the cached token has not expired', async (t) => {
+test('an explicit refresher is used and persisted even when the cached token has not expired', async (t) => {
   const { client, sent } = setup(t);
   const { session, persisted } = sessionFixture();
   const cached = { steamId: self, accountName: 'test', accessToken: accessJwt(), refreshToken: 'current-refresh', guardData: '' };

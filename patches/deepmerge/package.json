@@ -1,0 +1,7 @@
+{
+  "name": "deepmerge",
+  "version": "4.3.2",
+  "description": "Vendored copy of deepmerge@4.3.1 with the CVE-2026-93753 (GHSA-gcqx-w48m-w2h4 / prototype poisoning in mergeObject) fix applied. Upstream has not published a fixed release.",
+  "main": "index.js",
+  "license": "MIT"
+}

@@ -760,7 +760,7 @@ type SteamChatContextValue = SteamChatState & {
 const SteamChatContext = createContext<SteamChatContextValue | null>(null);
 
 export function SteamChatProvider({ children }: { children: ReactNode }) {
-  const { status, credentials, getAccessToken } = useSession();
+  const { status, credentials, getWebAccessToken } = useSession();
   const [state, dispatch] = useReducer(reduce, initialState);
 
   const credentialsRef = useRef(credentials);
@@ -929,13 +929,11 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
     const account = credentialsRef.current?.steamId;
     if (!client?.isLoggedOn || !account) throw new Error('Reconnect to Steam before uploading an image.');
     const isCurrent = () => clientRef.current === client && credentialsRef.current?.steamId === account && client.isLoggedOn;
-    // The CM is already authenticated with the refresh token. Derive the web
-    // access token there, so an expired/rejected HTTP routing token cannot
-    // leave image uploads using stale cookies while chat still works.
-    const accessToken = await getAccessToken(({ refreshToken }) => {
-      if (!isCurrent()) throw new Error('Your Steam session changed. Choose the image again.');
-      return client.generateAccessTokenForApp(refreshToken);
-    });
+    // Community accepts the same mobile access token the app uses for chat.
+    // Mint it through the auth service, which is the documented web-cookie
+    // flow, rather than deriving it over the CM session.
+    if (!isCurrent()) throw new Error('Your Steam session changed. Choose the image again.');
+    const accessToken = await getWebAccessToken();
     try {
       await uploadChatImage({ steamId: account, accessToken, sessionId: bytesToHex(getRandomBytes(12)) }, steamId, image, isCurrent);
     } finally {
@@ -943,7 +941,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       // including when a lost HTTP response leaves delivery uncertain.
       if (isCurrent()) loadConversation(steamId, true);
     }
-  }, [getAccessToken, loadConversation]);
+  }, [getWebAccessToken, loadConversation]);
 
   const sendMessage = useCallback(async (steamId: string, text: string) => {
     const client = clientRef.current;

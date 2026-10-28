@@ -26,30 +26,43 @@ transparency and GIF animation are retained. Steam's upload limit is 30 MiB.
 
 ## Protocol
 
-The implementation follows the supplied vanilla Steam Chat APK's upload flow:
-`https://steam-chat.com/chat/beginfileupload/?l=english` → signed binary PUT →
-`https://steam-chat.com/chat/commitfileupload/` with the
+The implementation follows the vanilla Steam Chat upload flow:
+`https://steamcommunity.com/chat/beginfileupload/?l=english` → signed binary PUT →
+`https://steamcommunity.com/chat/commitfileupload/` with the
 friend's SteamID. **Commit dispatches the image**, so it does not send an extra
 `FriendMessages.SendMessage`. Each form carries the same session ID and file SHA-1.
-The APK configures `CHAT_BASE_URL` separately from `COMMUNITY_BASE_URL`; using
-the Community origin here did not match the mobile app. Its Hermes bytecode
-sets `steamLoginSecure` to the encoded SteamID + `||` + mobile access token,
-and installs the matching `sessionid` cookie. This also matches
+Steam's current web chat client sets `CHAT_BASE_URL` to
+`https://steamcommunity.com/`, and the mobile access-token cookie is documented
+for Community. The supplied APK points at the legacy `steam-chat.com` origin;
+that host no longer serves `/chat/clientjstoken` or its login routes, leaving
+it a stripped legacy endpoint rather than the current chat backend. The APK's Hermes
+bytecode sets `steamLoginSecure` to the encoded SteamID + `||` + mobile access
+token and installs the matching `sessionid` cookie, which is the format used
+here. This also matches
 [node-steam-session](https://github.com/DoctorMcKay/node-steam-session/blob/master/src/LoginSession.ts).
-Before each image upload, the app calls `Authentication.GenerateAccessTokenForApp#1`
-over its already authenticated CM connection, following the APK's token-refresh
-transport. The resulting access token and any rotated refresh token are
-persisted before building the cookie. This avoids relying on an expired HTTP
-routing token while ordinary chat remains connected using the refresh token.
-Explicit refresh failures stop the upload instead of returning a cached token.
-Account changes invalidate queued/in-flight refreshes.
+Web-session tokens come from
+`IAuthenticationService/GenerateAccessTokenForApp/v1/`, the mobile web-cookie
+flow used by maintained clients. The refresh token in the protobuf body
+authenticates that call, so the (possibly expired) access token is deliberately
+not sent as an `access_token` routing parameter. The auth-service token carries
+the mobile token's `["web", "mobile"]` audience; a token derived over a CM
+session is the remaining plausible scope difference and is no longer used for
+Community requests. The resulting access token and any rotated
+refresh token are persisted before building the cookie. Explicit refresh
+failures stop the upload instead of returning a cached token. Account changes
+invalidate queued/in-flight refreshes. The auth session is created for the
+`Mobile` website ID, matching the mobile platform; the legacy APK's `Unknown`
+default only applied to its old `ClientLogOn` path.
 
-The app sends these cookies explicitly to the chat origin and omits the
-ambient cookie jar. Login cookies are never attached to the storage-host PUT.
-Reading a published CDN image URL is separate from the authenticated upload
-and commit operations. Upload errors distinguish HTTP/authentication failures,
-invalid responses, and transport failures rather than labeling all of them as
-a connection problem.
+The app sends these cookies explicitly to the Community chat origin and omits
+the ambient cookie jar. Begin and commit also carry the Community chat
+`Origin`/`Referer`, matching Valve's web client and third-party clients. Login
+cookies are never attached to the storage-host PUT. Reading a published CDN
+image URL is separate from the authenticated upload and commit operations.
+Upload errors distinguish HTTP/authentication failures, invalid responses, and
+transport failures rather than labeling all of them as a connection problem.
+Steam's JSON `message` (for example `Not Logged on.`) is included in the error,
+but request cookies and tokens never are.
 
 `Player.GetEmoticonList#1` uses the
 [Steam protobuf schema](https://github.com/SteamTracking/Protobufs/blob/master/steam/steammessages_player.steamclient.proto).
@@ -58,7 +71,7 @@ renderer recognizes image attributes (including thumbnails and unclosed stored
 tags), `:name:`, `[emoticon]name[/emoticon]`, and legacy `ːnameː`.
 
 Upload failures retain the selected image and draft. Upload authentication is
-renewed automatically through CM; a rejected web cookie does not by itself
+renewed automatically through the auth service; a rejected web cookie does not by itself
 tell the user to sign in again. If a commit response is
 lost, history is refreshed and the image cannot be blindly resent; remove it
 only after checking whether it arrived. In-flight token refreshes are shared,

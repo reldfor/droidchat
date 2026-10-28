@@ -1,9 +1,11 @@
 import { isSteamImageUrl } from './chat-media';
 import type { ChatImage } from './image-picker';
 
-// The mobile APK sets CHAT_BASE_URL to steam-chat.com, separately from
-// COMMUNITY_BASE_URL. The upload controllers live on the chat origin.
-const CHAT_UPLOAD = 'https://steam-chat.com/chat/';
+// Steam's current chat client (CHAT_BASE_URL) and the documented mobile
+// access-token cookie flow both target the Community origin. The legacy
+// steam-chat.com host still exposes these controllers but no longer serves
+// the adjacent login/token routes, so it is not a reliable session target.
+const CHAT_UPLOAD = 'https://steamcommunity.com/chat/';
 const MAX_BYTES = 30 * 1024 * 1024;
 
 export class ImageUploadError extends Error {
@@ -28,6 +30,17 @@ async function timedFetch(url: string, options: RequestInit, timeoutMs = 30_000)
   finally { clearTimeout(timer); }
 }
 
+/** Steam's error JSON is safe to surface; never include request credentials. */
+async function readSteamMessage(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    const message = body && typeof body === 'object' && 'message' in body ? (body as { message?: unknown }).message : undefined;
+    return typeof message === 'string' ? message.replace(/[\u0000-\u001f]/g, ' ').slice(0, 120) : '';
+  } catch {
+    return '';
+  }
+}
+
 /** Chat commit sends the image itself; do not send a second friend message. */
 export async function uploadChatImage(
   credentials: Credentials,
@@ -39,7 +52,7 @@ export async function uploadChatImage(
   if (!/^\d{17}$/.test(friendSteamId)) throw new ImageUploadError('This Steam friend could not be found.');
   if (!/^[a-f0-9]{40}$/i.test(image.sha1)) throw new ImageUploadError('This image could not be read. Choose it again.');
   const fields: Record<string, string> = {
-    sessionid: credentials.sessionId, l: 'english', file_name: `${credentials.sessionId}_${image.filename}`,
+    sessionid: credentials.sessionId, l: 'english', file_name: `${Date.now()}_${image.filename}`,
     file_sha: image.sha1, file_type: image.mimeType,
     file_image_width: String(image.width), file_image_height: String(image.height),
   };
@@ -50,12 +63,25 @@ export async function uploadChatImage(
     let response: Response;
     try {
       const query = endpoint === 'beginfileupload' ? '?l=english' : '';
-      response = await timedFetch(`${CHAT_UPLOAD}${endpoint}/${query}`, { method: 'POST', headers: { Cookie: cookie }, credentials: 'omit', redirect: 'error', body: form });
+      // Same-origin markers match the Community chat client and its
+      // maintained third-party clients; the cookie is still the credential.
+      response = await timedFetch(`${CHAT_UPLOAD}${endpoint}/${query}`, {
+        method: 'POST',
+        headers: {
+          Cookie: cookie,
+          Origin: 'https://steamcommunity.com',
+          Referer: 'https://steamcommunity.com/chat/',
+        },
+        credentials: 'omit',
+        redirect: 'error',
+        body: form,
+      });
     } catch {
       throw new ImageUploadError('Could not reach Steam\'s image upload service. Check your connection and try again.');
     }
     if (response.status === 401 || response.status === 403) {
-      throw new ImageUploadError(`Steam refused the image upload session (HTTP ${response.status}). Try sending the image again.`);
+      const detail = (await readSteamMessage(response)).replace(/\.$/, '');
+      throw new ImageUploadError(`Steam refused the image upload session (HTTP ${response.status})${detail ? `: ${detail}` : ''}. Try sending the image again.`);
     }
     if (!response.ok) throw new ImageUploadError(`Steam could not complete the image upload (HTTP ${response.status}).`);
     try { return await response.json(); }
@@ -71,8 +97,8 @@ export async function uploadChatImage(
   if (!ticket || !/^\d+$/.test(String(ticket.ugcid)) || !hmac || timestamp === undefined || !/^[a-z0-9.-]+(?::\d+)?$/i.test(ticket.url_host ?? '') || !ticket.url_path?.startsWith('/')) {
     throw new ImageUploadError('Steam refused the image upload. Reconnect to Steam and try again.');
   }
-  // Login cookies go only to steam-chat.com. The storage host receives its
-  // signed headers and the binary image, never our login or session cookies.
+  // Login cookies go only to steamcommunity.com. The storage host receives
+  // its signed headers and the binary image, never our login/session cookies.
   const headers: Record<string, string> = {};
   for (const header of ticket.request_headers ?? []) {
     if (!/^(?:host|content-length|cookie)$/i.test(header.name)) headers[header.name] = header.value;
