@@ -1,6 +1,6 @@
 # Images and Steam emoticons
 
-In a connected conversation:
+In a connected conversation or group room:
 
 - Tap the photo icon, choose an image, review its preview, then tap Send.
   Remove the preview with × to choose a different image. Optional text is sent
@@ -29,8 +29,10 @@ transparency and GIF animation are retained. Steam's upload limit is 30 MiB.
 The implementation follows the vanilla Steam Chat upload flow:
 `https://steamcommunity.com/chat/beginfileupload/?l=english` → signed binary PUT →
 `https://steamcommunity.com/chat/commitfileupload/` with the
-friend's SteamID. **Commit dispatches the image**, so it does not send an extra
-`FriendMessages.SendMessage`. Each form carries the same session ID and file SHA-1.
+friend's SteamID or, in a group room, its `chat_group_id` and `chat_id`.
+**Commit dispatches the image**, so it does not send an extra
+`FriendMessages.SendMessage` or `ChatRoom.SendChatMessage`. Each form carries
+the same session ID and file SHA-1.
 Steam's current web chat client sets `CHAT_BASE_URL` to
 `https://steamcommunity.com/`, and the mobile access-token cookie is documented
 for Community. The supplied APK points at the legacy `steam-chat.com` origin;
@@ -75,7 +77,8 @@ renewed automatically through the auth service; a rejected web cookie does not b
 tell the user to sign in again. If a commit response is
 lost, history is refreshed and the image cannot be blindly resent; remove it
 only after checking whether it arrived. In-flight token refreshes are shared,
-and old clients cannot populate a newly signed-in account's history.
+and old clients cannot populate a newly signed-in account's history. Group
+rooms use the same recovery path and refresh their own room history.
 
 ## Verification
 

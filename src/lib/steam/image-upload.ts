@@ -22,6 +22,7 @@ type UploadTicket = {
   timestamp?: number | string;
 };
 type Credentials = { steamId: string; accessToken: string; sessionId: string };
+type CommitTarget = { friendSteamId: string } | { chatGroupId: string; chatId: string };
 
 async function timedFetch(url: string, options: RequestInit, timeoutMs = 30_000): Promise<Response> {
   const controller = new AbortController();
@@ -48,8 +49,31 @@ export async function uploadChatImage(
   image: ChatImage,
   isCurrent: () => boolean = () => true,
 ): Promise<string | undefined> {
-  if (!image.bytes.length || image.bytes.length > MAX_BYTES) throw new ImageUploadError('Choose an image smaller than 30 MB.');
   if (!/^\d{17}$/.test(friendSteamId)) throw new ImageUploadError('This Steam friend could not be found.');
+  return uploadChatImageTo(credentials, { friendSteamId }, image, isCurrent);
+}
+
+/** Group uploads use the room ids instead of a friend SteamID in the commit. */
+export async function uploadChatRoomImage(
+  credentials: Credentials,
+  chatGroupId: string,
+  chatId: string,
+  image: ChatImage,
+  isCurrent: () => boolean = () => true,
+): Promise<string | undefined> {
+  if (!/^\d{1,20}$/.test(chatGroupId) || !/^\d{1,20}$/.test(chatId)) {
+    throw new ImageUploadError('This group chat could not be found.');
+  }
+  return uploadChatImageTo(credentials, { chatGroupId, chatId }, image, isCurrent);
+}
+
+async function uploadChatImageTo(
+  credentials: Credentials,
+  target: CommitTarget,
+  image: ChatImage,
+  isCurrent: () => boolean,
+): Promise<string | undefined> {
+  if (!image.bytes.length || image.bytes.length > MAX_BYTES) throw new ImageUploadError('Choose an image smaller than 30 MB.');
   if (!/^[a-f0-9]{40}$/i.test(image.sha1)) throw new ImageUploadError('This image could not be read. Choose it again.');
   const fields: Record<string, string> = {
     sessionid: credentials.sessionId, l: 'english', file_name: `${Date.now()}_${image.filename}`,
@@ -103,7 +127,10 @@ export async function uploadChatImage(
   for (const header of ticket.request_headers ?? []) {
     if (!/^(?:host|content-length|cookie)$/i.test(header.name)) headers[header.name] = header.value;
   }
-  const commitFields = { ...fields, ugcid: String(ticket.ugcid), timestamp: String(timestamp), hmac, friend_steamid: friendSteamId, spoiler: '0' };
+  const targetFields: Record<string, string> = 'friendSteamId' in target
+    ? { friend_steamid: target.friendSteamId }
+    : { chat_group_id: target.chatGroupId, chat_id: target.chatId };
+  const commitFields = { ...fields, ugcid: String(ticket.ugcid), timestamp: String(timestamp), hmac, ...targetFields, spoiler: '0' };
   try {
     if (!isCurrent()) throw new Error('Session changed');
     const uploaded = await timedFetch(`${ticket.use_https === false ? 'http' : 'https'}://${ticket.url_host}${ticket.url_path}`, { method: 'PUT', headers, credentials: 'omit', redirect: 'error', body: image.bytes }, 90_000);

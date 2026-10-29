@@ -25,31 +25,61 @@ import {
   GID_NIL,
   decodeAccountInfo,
   decodeAckEcho,
+  decodeChatRoomAckEcho,
+  decodeChatRoomGroupRoomsChange,
+  decodeChatRoomGroupUserStateNotification,
+  decodeGetChatRoomGroupStateResponse,
+  decodeChatRoomGroupsResponse,
+  decodeChatRoomHeaderStateNotification,
+  decodeChatRoomHistoryResponse,
+  decodeChatRoomMessageModified,
   decodeFriendsList,
   decodeHeader,
+  decodeIncomingChatRoomMessage,
   decodeIncomingMessage,
   decodeLoggedOff,
   decodeLogonResponse,
   decodeMessageSessions,
   decodeMulti,
   decodePersonaState,
+  decodePlayerLinkDetailsResponse,
   decodeRecentMessagesResponse,
+  decodeSendChatRoomMessageResponse,
   decodeSendMessageResponse,
+  decodeSetActiveChatRoomGroupsResponse,
+  encodeAckChatRoomMessage,
   encodeAckMessage,
   encodeChangeStatus,
   encodeGetActiveMessageSessions,
+  encodeGetChatRoomGroupState,
+  encodeGetChatRoomHistory,
+  encodeGetPlayerLinkDetails,
   encodeGetRecentMessages,
   encodeHeader,
   encodeLogon,
   encodeRequestFriendData,
+  encodeSendChatRoomMessage,
   encodeSendMessage,
+  encodeSetActiveChatRoomGroups,
   type AckEcho,
   type AccountInfo,
+  type ChatRoomAckEcho,
+  type ChatRoomGroupHeaderState,
+  type ChatRoomGroupRoomsChange,
+  type ChatRoomGroupState,
+  type ChatRoomGroupUserStateNotification,
+  type ChatRoomHistoryInput,
+  type ChatRoomHistoryResponse,
+  type ChatRoomMessageModified,
+  type ChatRoomSummaryPair,
   type CmFriend,
   type CmPersona,
+  type IncomingChatRoomMessage,
   type IncomingMessage,
   type MessageSession,
+  type PlayerProfile,
   type RecentMessagesResponse,
+  type SendChatRoomMessageResponse,
   type SendMessageResponse,
 } from './cm-proto';
 
@@ -96,7 +126,16 @@ export type SteamCmEvent =
   | { type: 'account-info'; info: AccountInfo }
   | { type: 'message'; message: IncomingMessage }
   | { type: 'ack'; ack: AckEcho }
-  | { type: 'sessions'; sessions: MessageSession[] };
+  | { type: 'sessions'; sessions: MessageSession[] }
+  | { type: 'chat-groups'; groups: ChatRoomSummaryPair[] }
+  | { type: 'chat-groups-error' }
+  | { type: 'chat-group-message'; message: IncomingChatRoomMessage }
+  | { type: 'chat-group-ack'; ack: ChatRoomAckEcho }
+  | { type: 'chat-group-user-state'; notification: ChatRoomGroupUserStateNotification }
+  | { type: 'chat-group-header'; header: ChatRoomGroupHeaderState }
+  | { type: 'chat-group-rooms'; change: ChatRoomGroupRoomsChange }
+  | { type: 'chat-group-modified'; change: ChatRoomMessageModified }
+  | { type: 'chat-groups-resync' };
 
 export type SteamCmClientOptions = {
   steamId: string;
@@ -183,6 +222,8 @@ export class SteamCmClient {
   private reconnectDelay = 1_000;
 
   private readonly pending = new Map<string, PendingRpc>();
+  /** Groups this session has activated; replayed after every reconnect. */
+  private readonly activeChatGroupIds = new Set<string>();
 
   constructor(options: SteamCmClientOptions) {
     this.steamId = options.steamId;
@@ -354,6 +395,110 @@ export class SteamCmClient {
       'FriendMessages.AckMessage#1',
       encodeAckMessage(steamId, timestamp),
     );
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* Group chat                                                               */
+  /* ------------------------------------------------------------------------ */
+
+  async getMyChatRoomGroups(): Promise<ChatRoomSummaryPair[]> {
+    const response = await this.sendServiceRequest(
+      'ChatRoom.GetMyChatRoomGroups#1',
+      new Uint8Array(0),
+    );
+
+    return decodeChatRoomGroupsResponse(response.body);
+  }
+
+  /**
+   * Activates group chats for this CM session. Steam only pushes live
+   * messages for active groups, so the app keeps every listed group active
+   * while it is running (the desktop client activates groups per open window).
+   */
+  async setActiveChatRoomGroups(
+    chatGroupIds: string[],
+    requestGroupData = false,
+  ): Promise<ChatRoomGroupState[]> {
+    this.activeChatGroupIds.clear();
+
+    for (const chatGroupId of chatGroupIds) {
+      this.activeChatGroupIds.add(chatGroupId);
+    }
+
+    if (chatGroupIds.length === 0) {
+      return [];
+    }
+
+    const response = await this.sendServiceRequest(
+      'ChatRoom.SetSessionActiveChatRoomGroups#1',
+      encodeSetActiveChatRoomGroups({
+        chatGroupIds,
+        requestGroupData: requestGroupData ? chatGroupIds : undefined,
+      }),
+    );
+
+    return decodeSetActiveChatRoomGroupsResponse(response.body);
+  }
+
+  async getChatRoomGroupState(chatGroupId: string): Promise<ChatRoomGroupState> {
+    const response = await this.sendServiceRequest(
+      'ChatRoom.GetChatRoomGroupState#1',
+      encodeGetChatRoomGroupState(chatGroupId),
+    );
+
+    return decodeGetChatRoomGroupStateResponse(response.body);
+  }
+
+  async getChatRoomHistory(input: ChatRoomHistoryInput): Promise<ChatRoomHistoryResponse> {
+    const response = await this.sendServiceRequest(
+      'ChatRoom.GetMessageHistory#1',
+      encodeGetChatRoomHistory(input),
+    );
+
+    return decodeChatRoomHistoryResponse(response.body);
+  }
+
+  async sendChatRoomMessage(
+    chatGroupId: string,
+    chatId: string,
+    message: string,
+  ): Promise<SendChatRoomMessageResponse> {
+    const response = await this.sendServiceRequest(
+      'ChatRoom.SendChatMessage#1',
+      encodeSendChatRoomMessage({
+        chatGroupId,
+        chatId,
+        message,
+        echoToSender: false,
+      }),
+    );
+
+    return decodeSendChatRoomMessageResponse(response.body);
+  }
+
+  /** Read receipts for group rooms use a client notification, not a request. */
+  ackChatRoomMessage(chatGroupId: string, chatId: string, timestamp: number): void {
+    if (timestamp <= 0) {
+      return;
+    }
+
+    this.sendServiceNotification(
+      'ChatRoom.AckChatMessage#1',
+      encodeAckChatRoomMessage({ chatGroupId, chatId, timestamp }),
+    );
+  }
+
+  async getPlayerProfiles(steamIds: string[]): Promise<PlayerProfile[]> {
+    if (steamIds.length === 0) {
+      return [];
+    }
+
+    const response = await this.sendServiceRequest(
+      'Player.GetPlayerLinkDetails#1',
+      encodeGetPlayerLinkDetails(steamIds),
+    );
+
+    return decodePlayerLinkDetailsResponse(response.body);
   }
 
   private async run(): Promise<void> {
@@ -635,6 +780,15 @@ export class SteamCmClient {
     this.emit({ type: 'logged-on', steamId: this.steamId });
     this.sendChangeStatus(1);
     void this.loadSessions();
+    void this.loadChatGroups();
+
+    // A reconnect starts a new CM session, so previously active groups must
+    // be activated again before Steam will push their messages.
+    if (this.activeChatGroupIds.size > 0) {
+      void this.setActiveChatRoomGroups([...this.activeChatGroupIds]).catch(() => {
+        // The provider retries after it receives the fresh group list.
+      });
+    }
   }
 
   private handleLoggedOff(body: Uint8Array): void {
@@ -668,6 +822,41 @@ export class SteamCmClient {
         return;
       case 'FriendMessagesClient.NotifyAckMessageEcho#1':
         this.emit({ type: 'ack', ack: decodeAckEcho(body) });
+        return;
+      case 'ChatRoomClient.NotifyIncomingChatMessage#1':
+        this.emit({ type: 'chat-group-message', message: decodeIncomingChatRoomMessage(body) });
+        return;
+      case 'ChatRoomClient.NotifyAckChatMessageEcho#1':
+        this.emit({ type: 'chat-group-ack', ack: decodeChatRoomAckEcho(body) });
+        return;
+      case 'ChatRoomClient.NotifyChatGroupUserStateChanged#1':
+        this.emit({
+          type: 'chat-group-user-state',
+          notification: decodeChatRoomGroupUserStateNotification(body),
+        });
+        return;
+      case 'ChatRoomClient.NotifyChatRoomHeaderStateChange#1':
+        this.emit({
+          type: 'chat-group-header',
+          header: decodeChatRoomHeaderStateNotification(body),
+        });
+        return;
+      case 'ChatRoomClient.NotifyChatRoomGroupRoomsChange#1':
+        this.emit({
+          type: 'chat-group-rooms',
+          change: decodeChatRoomGroupRoomsChange(body),
+        });
+        return;
+      case 'ChatRoomClient.NotifyChatMessageModified#1':
+        this.emit({
+          type: 'chat-group-modified',
+          change: decodeChatRoomMessageModified(body),
+        });
+        return;
+      case 'ChatRoomClient.NotifyChatRoomDisconnect#1':
+        // Steam asks the session to re-activate its groups after a chat
+        // backend reconnect. The provider re-sends its active set.
+        this.emit({ type: 'chat-groups-resync' });
         return;
       default:
         return;
@@ -728,6 +917,22 @@ export class SteamCmClient {
     }
   }
 
+  private async loadChatGroups(): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const groups = await this.getMyChatRoomGroups();
+        this.emit({ type: 'chat-groups', groups });
+        return;
+      } catch {
+        if (attempt === 0) {
+          await delay(1_500);
+        }
+      }
+    }
+
+    this.emit({ type: 'chat-groups-error' });
+  }
+
   private sendServiceRequest(
     name: string,
     body: Uint8Array,
@@ -762,6 +967,26 @@ export class SteamCmClient {
         reject(new SteamCmError(EResult.NoConnection, 'WebSocket is not connected'));
       }
     });
+  }
+
+  /**
+   * Sends a unified service notification: a `ServiceMethodCallFromClient`
+   * frame with a target method but no job id. Steam does not reply.
+   */
+  private sendServiceNotification(name: string, body: Uint8Array): void {
+    if (!this.loggedOn || !this.socket) {
+      return;
+    }
+
+    this.sendPacket(
+      EMsg.ServiceMethodCallFromClient,
+      encodeHeader({
+        steamId: this.steamId,
+        clientSessionId: this.sessionId,
+        targetJobName: name,
+      }),
+      body,
+    );
   }
 
   private sendPacket(eMsg: number, header: Uint8Array, body: Uint8Array): boolean {

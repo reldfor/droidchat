@@ -70,6 +70,19 @@ export default function AppTabsLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="groups"
+        options={{
+          title: 'Groups',
+          tabBarIcon: ({ color, focused }) => (
+            <SymbolView
+              name={{ ios: 'person.3.fill', android: 'groups', web: 'groups' }}
+              size={focused ? 25 : 24}
+              tintColor={color}
+            />
+          ),
+        }}
+      />
     </Tabs>
   );
 }

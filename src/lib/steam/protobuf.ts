@@ -198,6 +198,73 @@ export function allOf(fields: ProtoField[], field: number): ProtoField[] {
   return fields.filter((entry) => entry.field === field);
 }
 
+/**
+ * Repeated numeric fields may arrive unpacked (one varint per field) or
+ * packed (one length-delimited field holding consecutive varints). Steam uses
+ * both forms across services, so callers read either representation.
+ */
+export function allNumbers(fields: ProtoField[], field: number): number[] {
+  const values: number[] = [];
+
+  for (const entry of allOf(fields, field)) {
+    if (!(entry.value instanceof Uint8Array)) {
+      values.push(Number(entry.value));
+      continue;
+    }
+
+    const bytes = entry.value;
+    let offset = 0;
+
+    while (offset < bytes.length) {
+      let result = 0n;
+      let shift = 0n;
+      let byte = 0;
+
+      do {
+        byte = bytes[offset];
+        offset += 1;
+        result |= BigInt(byte & 0x7f) << shift;
+        shift += 7n;
+      } while ((byte & 0x80) !== 0 && offset < bytes.length);
+
+      values.push(Number(result));
+    }
+  }
+
+  return values;
+}
+
+export function allUint64Strings(fields: ProtoField[], field: number): string[] {
+  const values: string[] = [];
+
+  for (const entry of allOf(fields, field)) {
+    if (!(entry.value instanceof Uint8Array)) {
+      values.push(entry.value.toString());
+      continue;
+    }
+
+    const bytes = entry.value;
+    let offset = 0;
+
+    while (offset < bytes.length) {
+      let result = 0n;
+      let shift = 0n;
+      let byte = 0;
+
+      do {
+        byte = bytes[offset];
+        offset += 1;
+        result |= BigInt(byte & 0x7f) << shift;
+        shift += 7n;
+      } while ((byte & 0x80) !== 0 && offset < bytes.length);
+
+      values.push(result.toString());
+    }
+  }
+
+  return values;
+}
+
 export function firstOf(fields: ProtoField[], field: number): ProtoField | undefined {
   return fields.find((entry) => entry.field === field);
 }

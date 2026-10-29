@@ -20,6 +20,7 @@ import {
 } from '@/lib/steam/cm-client';
 import {
   FRIEND_RELATIONSHIP_FRIEND,
+  type ChatRoomSummaryPair,
   type CmFriend,
   type CmPersona,
   type IncomingMessage,
@@ -39,11 +40,24 @@ import { EResult } from '@/lib/steam/constants';
 import type { SteamEmoticon } from '@/lib/steam/chat-media';
 import { bytesToHex } from '@/lib/steam/bytes';
 import type { ChatImage } from '@/lib/steam/image-picker';
-import { uploadChatImage } from '@/lib/steam/image-upload';
+import { uploadChatImage, uploadChatRoomImage } from '@/lib/steam/image-upload';
+import {
+  groupDisplayName,
+  groupReducer,
+  initialGroupChatState,
+  latestGroupRoom,
+  type GroupAuthorProfile,
+  type GroupChat,
+  type GroupChatSlice,
+} from '@/context/group-chat-state';
 import { useSession } from '@/context/session';
 
 const INITIAL_MESSAGE_COUNT = 100;
 const MORE_MESSAGE_COUNT = 50;
+const INITIAL_GROUP_MESSAGE_COUNT = 100;
+const MORE_GROUP_MESSAGE_COUNT = 50;
+const GROUP_HISTORY_INFINITE = 0x7fffffff;
+const GROUP_PROFILE_BATCH_SIZE = 100;
 const MAX_PREVIEWS = 12;
 const MAX_SESSIONS = 30;
 const PERSONA_FALLBACK_DELAY_MS = 2_500;
@@ -104,6 +118,15 @@ export type Conversation = {
 export type ChatListItem = {
   conversation: Conversation;
   friend: SteamFriend;
+};
+
+export type GroupChatListItem = {
+  group: GroupChat;
+  name: string;
+  avatarUrl: string | null;
+  preview?: ChatPreview;
+  unread: boolean;
+  lastActivity: number;
 };
 
 type SteamChatState = {
@@ -742,20 +765,31 @@ function describeError(error: unknown): string {
   return 'Something went wrong. Try again.';
 }
 
-type SteamChatContextValue = SteamChatState & {
-  chats: ChatListItem[];
-  ready: boolean;
-  sendMessage: (steamId: string, text: string) => Promise<void>;
-  getEmoticons: () => Promise<SteamEmoticon[]>;
-  sendImage: (steamId: string, image: ChatImage) => Promise<void>;
-  openConversation: (steamId: string) => void;
-  closeConversation: (steamId: string) => void;
-  loadConversation: (steamId: string, force?: boolean) => void;
-  loadMore: (steamId: string) => void;
-  markRead: (steamId: string, timestamp: number) => void;
-  sendTyping: (steamId: string) => void;
-  retryConnection: () => void;
-};
+type SteamChatContextValue = SteamChatState &
+  GroupChatSlice & {
+    chats: ChatListItem[];
+    groupChats: GroupChatListItem[];
+    ready: boolean;
+    sendMessage: (steamId: string, text: string) => Promise<void>;
+    getEmoticons: () => Promise<SteamEmoticon[]>;
+    sendImage: (steamId: string, image: ChatImage) => Promise<void>;
+    openConversation: (steamId: string) => void;
+    closeConversation: (steamId: string) => void;
+    loadConversation: (steamId: string, force?: boolean) => void;
+    loadMore: (steamId: string) => void;
+    markRead: (steamId: string, timestamp: number) => void;
+    sendTyping: (steamId: string) => void;
+    retryConnection: () => void;
+    refreshGroups: () => Promise<void>;
+    openGroup: (chatGroupId: string, chatId?: string) => void;
+    closeGroup: (chatGroupId: string) => void;
+    selectGroupRoom: (chatGroupId: string, chatId: string) => void;
+    loadGroupHistory: (chatGroupId: string, chatId: string, force?: boolean) => void;
+    loadMoreGroupHistory: (chatGroupId: string, chatId: string) => void;
+    markGroupRead: (chatGroupId: string, chatId: string, timestamp: number) => void;
+    sendGroupMessage: (chatGroupId: string, chatId: string, text: string) => Promise<void>;
+    sendGroupImage: (chatGroupId: string, chatId: string, image: ChatImage) => Promise<void>;
+  };
 
 const SteamChatContext = createContext<SteamChatContextValue | null>(null);
 
@@ -763,9 +797,14 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
   const { status, credentials, authRevision, getWebAccessToken, updateAccountProfile } =
     useSession();
   const [state, dispatch] = useReducer(reduce, initialState);
+  const [groupState, groupDispatch] = useReducer(groupReducer, initialGroupChatState);
 
   const credentialsRef = useRef(credentials);
   const stateRef = useRef(state);
+  const groupStateRef = useRef(groupState);
+  const groupProfilesRef = useRef(groupState.groupProfiles);
+  const requestedGroupProfiles = useRef(new Set<string>());
+  const groupAcksSentAt = useRef(new Map<string, number>());
   const clientRef = useRef<SteamCmClient | null>(null);
   /** Identifies the client allowed to mutate state; blocks late events after switches. */
   const clientTokenRef = useRef<symbol | null>(null);
@@ -780,6 +819,11 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    groupStateRef.current = groupState;
+    groupProfilesRef.current = groupState.groupProfiles;
+  }, [groupState]);
 
   /**
    * The CM pushes persona state right after the friends list, but a friend can
@@ -951,6 +995,414 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       }
     }
   }, []);
+
+  /**
+   * Group members are often not friends, so their persona is not part of the
+   * CM friends/persona stream. Resolve names through the public player-link
+   * service in batches and cache the result for the session.
+   */
+  const requestGroupProfiles = useCallback((steamIds: string[]) => {
+    const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
+
+    if (!client?.isLoggedOn || !clientToken) {
+      return;
+    }
+
+    const selfSteamId = stateRef.current.selfSteamId;
+    const known = groupProfilesRef.current;
+    const friends = stateRef.current.friends;
+    const unique = [...new Set(steamIds)].filter(
+      (steamId) =>
+        /^\d{17}$/.test(steamId) &&
+        steamId !== selfSteamId &&
+        !known[steamId] &&
+        !friends[steamId] &&
+        !requestedGroupProfiles.current.has(steamId),
+    );
+
+    if (unique.length === 0) {
+      return;
+    }
+
+    for (const steamId of unique) {
+      requestedGroupProfiles.current.add(steamId);
+    }
+
+    void (async () => {
+      const updates: Record<string, GroupAuthorProfile> = {};
+
+      for (let index = 0; index < unique.length; index += GROUP_PROFILE_BATCH_SIZE) {
+        const batch = unique.slice(index, index + GROUP_PROFILE_BATCH_SIZE);
+
+        if (clientTokenRef.current !== clientToken || !client.isLoggedOn) {
+          return;
+        }
+
+        try {
+          const profiles = await client.getPlayerProfiles(batch);
+
+          for (const profile of profiles) {
+            if (!profile.steamId) {
+              continue;
+            }
+
+            updates[profile.steamId] = {
+              name: profile.personaName || UNKNOWN_FRIEND_NAME,
+              avatarUrl: profile.avatarHash ? buildAvatarUrl(profile.avatarHash) : null,
+            };
+            requestedGroupProfiles.current.add(profile.steamId);
+          }
+        } catch {
+          // Allow another attempt after a transient failure.
+          for (const steamId of batch) {
+            requestedGroupProfiles.current.delete(steamId);
+          }
+        }
+      }
+
+      if (clientTokenRef.current === clientToken && Object.keys(updates).length > 0) {
+        groupDispatch({ type: 'group-profiles', profiles: updates });
+      }
+    })();
+  }, []);
+
+  const activateGroups = useCallback(
+    (chatGroupIds: string[], clientToken: symbol) => {
+      const client = clientRef.current;
+
+      if (!client?.isLoggedOn || chatGroupIds.length === 0) {
+        return;
+      }
+
+      void client
+        .setActiveChatRoomGroups(chatGroupIds, true)
+        .then((states) => {
+          if (clientTokenRef.current === clientToken) {
+            groupDispatch({ type: 'group-states', states });
+          }
+        })
+        .catch(() => {
+          // Messages still work while a group is open; the next group-list
+          // refresh or reconnect retries activation.
+        });
+    },
+    [],
+  );
+
+  const applyGroups = useCallback(
+    (groups: ChatRoomSummaryPair[]) => {
+      const clientToken = clientTokenRef.current;
+
+      groupDispatch({ type: 'groups', groups });
+      requestedGroupProfiles.current.clear();
+      groupAcksSentAt.current.clear();
+
+      const client = clientRef.current;
+      if (!client?.isLoggedOn || !clientToken) {
+        return;
+      }
+
+      const chatGroupIds = groups
+        .map((pair) => pair.groupSummary.chatGroupId)
+        .filter((chatGroupId): chatGroupId is string => Boolean(chatGroupId));
+
+      activateGroups(chatGroupIds, clientToken);
+
+      const topMembers = groups.flatMap((pair) =>
+        pair.groupSummary.topMembers.map((accountId) => steamIdFromAccountId(accountId)),
+      );
+      requestGroupProfiles(topMembers);
+    },
+    [activateGroups, requestGroupProfiles],
+  );
+
+  const refreshGroups = useCallback(async () => {
+    const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
+
+    if (!client?.isLoggedOn || !clientToken) {
+      return;
+    }
+
+    try {
+      const groups = await client.getMyChatRoomGroups();
+
+      if (clientTokenRef.current === clientToken) {
+        applyGroups(groups);
+      }
+    } catch (error) {
+      if (clientTokenRef.current === clientToken) {
+        groupDispatch({ type: 'groups-error', error: describeError(error) });
+      }
+    }
+  }, [applyGroups]);
+
+  const loadGroupHistory = useCallback((chatGroupId: string, chatId: string, force = false) => {
+    const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
+    const group = groupStateRef.current.groups[chatGroupId];
+    const room = group?.rooms[chatId];
+
+    if (!client || !clientToken || !client.isLoggedOn || !group) {
+      return;
+    }
+
+    if (!force && (room?.loading || room?.loaded)) {
+      return;
+    }
+
+    groupDispatch({ type: 'group-history-loading', chatGroupId, chatId });
+
+    void client
+      .getChatRoomHistory({
+        chatGroupId,
+        chatId,
+        lastTime: GROUP_HISTORY_INFINITE,
+        lastOrdinal: 0,
+        startTime: 0,
+        startOrdinal: 0,
+        maxCount: INITIAL_GROUP_MESSAGE_COUNT,
+      })
+      .then((response) => {
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
+        groupDispatch({
+          type: 'group-history',
+          chatGroupId,
+          chatId,
+          messages: response.messages,
+          moreAvailable: response.moreAvailable,
+          selfSteamId: stateRef.current.selfSteamId,
+        });
+        requestGroupProfiles(
+          response.messages.map((message) =>
+            steamIdFromAccountId(message.senderAccountId),
+          ),
+        );
+      })
+      .catch((error: unknown) => {
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
+        groupDispatch({
+          type: 'group-history-error',
+          chatGroupId,
+          chatId,
+          error: describeError(error),
+        });
+      });
+  }, [requestGroupProfiles]);
+
+  const loadMoreGroupHistory = useCallback((chatGroupId: string, chatId: string) => {
+    const client = clientRef.current;
+    const clientToken = clientTokenRef.current;
+    const group = groupStateRef.current.groups[chatGroupId];
+    const room = group?.rooms[chatId];
+
+    if (!client || !clientToken || !client.isLoggedOn || !room || room.loading || !room.hasMore) {
+      return;
+    }
+
+    groupDispatch({ type: 'group-history-loading', chatGroupId, chatId });
+
+    void client
+      .getChatRoomHistory({
+        chatGroupId,
+        chatId,
+        lastTime: room.oldestTime || GROUP_HISTORY_INFINITE,
+        lastOrdinal: room.oldestOrdinal,
+        startTime: 0,
+        startOrdinal: 0,
+        maxCount: MORE_GROUP_MESSAGE_COUNT,
+      })
+      .then((response) => {
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
+        groupDispatch({
+          type: 'group-history',
+          chatGroupId,
+          chatId,
+          messages: response.messages,
+          moreAvailable: response.moreAvailable,
+          selfSteamId: stateRef.current.selfSteamId,
+        });
+        requestGroupProfiles(
+          response.messages.map((message) =>
+            steamIdFromAccountId(message.senderAccountId),
+          ),
+        );
+      })
+      .catch((error: unknown) => {
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
+        groupDispatch({
+          type: 'group-history-error',
+          chatGroupId,
+          chatId,
+          error: describeError(error),
+        });
+      });
+  }, [requestGroupProfiles]);
+
+  const openGroup = useCallback(
+    (chatGroupId: string, chatId?: string) => {
+      const group = groupStateRef.current.groups[chatGroupId];
+
+      groupDispatch({ type: 'group-open', chatGroupId, chatId });
+
+      if (!group) {
+        return;
+      }
+
+      const selectedChatId =
+        (chatId && group.rooms[chatId] ? chatId : undefined) ||
+        group.selectedChatId ||
+        group.defaultChatId ||
+        group.roomOrder[0];
+
+      if (selectedChatId) {
+        loadGroupHistory(chatGroupId, selectedChatId);
+      }
+    },
+    [loadGroupHistory],
+  );
+
+  const closeGroup = useCallback((chatGroupId: string) => {
+    groupDispatch({ type: 'group-close', chatGroupId });
+  }, []);
+
+  const selectGroupRoom = useCallback(
+    (chatGroupId: string, chatId: string) => {
+      groupDispatch({ type: 'group-select-room', chatGroupId, chatId });
+      loadGroupHistory(chatGroupId, chatId);
+    },
+    [loadGroupHistory],
+  );
+
+  const markGroupRead = useCallback((chatGroupId: string, chatId: string, timestamp: number) => {
+    if (timestamp <= 0) {
+      return;
+    }
+
+    groupDispatch({ type: 'group-ack', chatGroupId, chatId, timestamp });
+
+    const key = `${chatGroupId}:${chatId}`;
+    const sentAt = groupAcksSentAt.current.get(key) ?? 0;
+
+    if (timestamp <= sentAt) {
+      return;
+    }
+
+    groupAcksSentAt.current.set(key, timestamp);
+
+    const client = clientRef.current;
+    if (client?.isLoggedOn) {
+      client.ackChatRoomMessage(chatGroupId, chatId, timestamp);
+    }
+  }, []);
+
+  const sendGroupMessage = useCallback(
+    async (chatGroupId: string, chatId: string, text: string) => {
+      const client = clientRef.current;
+      const clientToken = clientTokenRef.current;
+      const selfSteamId = stateRef.current.selfSteamId;
+      const trimmed = text.trim();
+
+      if (!client?.isLoggedOn || !clientToken || !selfSteamId) {
+        throw new Error('Reconnect to Steam before sending a message.');
+      }
+
+      if (!trimmed) {
+        return;
+      }
+
+      const id = `group-local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const sentAt = Math.floor(Date.now() / 1000);
+
+      groupDispatch({
+        type: 'group-send-pending',
+        chatGroupId,
+        chatId,
+        message: {
+          id,
+          authorSteamId: selfSteamId,
+          text: stripBbcode(trimmed),
+          content: trimmed,
+          sentAt,
+          ordinal: 0,
+          mine: true,
+          pending: true,
+        },
+      });
+
+      try {
+        const response = await client.sendChatRoomMessage(chatGroupId, chatId, trimmed);
+
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
+        groupDispatch({
+          type: 'group-send-ok',
+          chatGroupId,
+          chatId,
+          id,
+          timestamp: response.serverTimestamp,
+          ordinal: response.ordinal,
+        });
+      } catch (error) {
+        if (clientTokenRef.current !== clientToken) {
+          return;
+        }
+
+        const confirmed = groupStateRef.current.groups[chatGroupId]?.rooms[chatId]?.messages.find(
+          (message) =>
+            message.id === id &&
+            !message.pending &&
+            !message.failed,
+        );
+
+        if (confirmed) {
+          return;
+        }
+
+        groupDispatch({ type: 'group-send-failed', chatGroupId, chatId, id });
+        throw new Error(describeError(error));
+      }
+    },
+    [],
+  );
+
+  const sendGroupImage = useCallback(async (chatGroupId: string, chatId: string, image: ChatImage) => {
+    if (Platform.OS === 'web') throw new Error('Image uploads are available in the Android and iOS app.');
+    const client = clientRef.current;
+    const account = credentialsRef.current?.steamId;
+    if (!client?.isLoggedOn || !account) throw new Error('Reconnect to Steam before uploading an image.');
+    const isCurrent = () => clientRef.current === client && credentialsRef.current?.steamId === account && client.isLoggedOn;
+    if (!isCurrent()) throw new Error('Your Steam session changed. Choose the image again.');
+    const accessToken = await getWebAccessToken();
+    try {
+      await uploadChatRoomImage(
+        { steamId: account, accessToken, sessionId: bytesToHex(getRandomBytes(12)) },
+        chatGroupId,
+        chatId,
+        image,
+        isCurrent,
+      );
+    } finally {
+      // The commit dispatches the room message; reconcile from history,
+      // including when a lost HTTP response leaves delivery uncertain.
+      if (isCurrent()) loadGroupHistory(chatGroupId, chatId, true);
+    }
+  }, [getWebAccessToken, loadGroupHistory]);
 
   const getEmoticons = useCallback(() => {
     const client = clientRef.current;
@@ -1160,9 +1612,113 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
           break;
         case 'ack':
           break;
+        case 'chat-groups':
+          applyGroups(event.groups);
+          break;
+        case 'chat-groups-error':
+          groupDispatch({
+            type: 'groups-error',
+            error: 'Could not load your group chats. Pull down to try again.',
+          });
+          break;
+        case 'chat-group-message': {
+          const message = event.message;
+          const text = stripBbcode(message.messageNoBbcode || message.message);
+          const content = message.message || message.messageNoBbcode;
+
+          if (message.serverMessage !== 0 || !text) {
+            break;
+          }
+
+          const mine = message.senderSteamId === stateRef.current.selfSteamId;
+          const sentAt = message.timestamp || Math.floor(Date.now() / 1000);
+          const knownGroup = groupStateRef.current.groups[message.chatGroupId];
+
+          groupDispatch({
+            type: 'group-message',
+            chatGroupId: message.chatGroupId,
+            chatId: message.chatId,
+            mine,
+            incoming: message,
+            message: {
+              id: `gm-${message.chatId}-${message.ordinal}-${sentAt}`,
+              authorSteamId: message.senderSteamId,
+              text,
+              content,
+              sentAt,
+              ordinal: message.ordinal,
+              mine,
+            },
+          });
+
+          if (!mine) {
+            requestGroupProfiles([message.senderSteamId]);
+          }
+
+          if (!knownGroup) {
+            // A group can be joined or created on another device. Fetch the
+            // list so the Groups tab has a summary for this room.
+            void refreshGroups();
+          }
+          break;
+        }
+        case 'chat-group-ack':
+          groupDispatch({
+            type: 'group-ack',
+            chatGroupId: event.ack.chatGroupId,
+            chatId: event.ack.chatId,
+            timestamp: event.ack.timestamp,
+          });
+          break;
+        case 'chat-group-user-state': {
+          const notification = event.notification;
+          groupDispatch({ type: 'group-notification', notification });
+
+          if (notification.userAction === 1) {
+            const token = clientTokenRef.current;
+            if (token) {
+              activateGroups(
+                [...Object.keys(groupStateRef.current.groups), notification.chatGroupId],
+                token,
+              );
+            }
+            requestGroupProfiles(
+              notification.groupSummary.topMembers.map((accountId) =>
+                steamIdFromAccountId(accountId),
+              ),
+            );
+          }
+          break;
+        }
+        case 'chat-group-header':
+          groupDispatch({ type: 'group-header', header: event.header });
+          break;
+        case 'chat-group-rooms':
+          groupDispatch({ type: 'group-rooms', change: event.change });
+          break;
+        case 'chat-group-modified':
+          groupDispatch({ type: 'group-modified', change: event.change });
+          break;
+        case 'chat-groups-resync': {
+          const token = clientTokenRef.current;
+          const chatGroupIds = Object.keys(groupStateRef.current.groups);
+
+          if (token && chatGroupIds.length > 0) {
+            activateGroups(chatGroupIds, token);
+          }
+          break;
+        }
       }
     },
-    [loadConversation, loadPreviews, schedulePersonaFallback],
+    [
+      activateGroups,
+      applyGroups,
+      loadConversation,
+      loadPreviews,
+      refreshGroups,
+      requestGroupProfiles,
+      schedulePersonaFallback,
+    ],
   );
 
   const steamId = credentials?.steamId ?? null;
@@ -1179,6 +1735,9 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       clientRef.current?.stop();
       clientRef.current = null;
       dispatch({ type: 'reset' });
+      groupDispatch({ type: 'reset' });
+      requestedGroupProfiles.current.clear();
+      groupAcksSentAt.current.clear();
       return;
     }
 
@@ -1211,6 +1770,9 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
     clientTokenRef.current = clientToken;
     clientRef.current = client;
     dispatch({ type: 'reset' });
+    groupDispatch({ type: 'reset' });
+    requestedGroupProfiles.current.clear();
+    groupAcksSentAt.current.clear();
     client.start();
 
     return () => {
@@ -1280,10 +1842,53 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       }));
   }, [state.conversations, state.friends]);
 
+  const groupChats = useMemo<GroupChatListItem[]>(() => {
+    const selfAccountId = state.selfSteamId
+      ? accountIdFromSteamId(state.selfSteamId)
+      : 0;
+
+    return Object.values(groupState.groups)
+      .map((group) => {
+        const latest = latestGroupRoom(group);
+        const preview =
+          latest && latest.lastMessageAt > 0
+            ? {
+                text:
+                  stripBbcode(latest.lastMessage) ||
+                  (latest.lastMessageAt > 0 ? 'New messages' : ''),
+                sentAt: latest.lastMessageAt,
+                mine: selfAccountId > 0 && latest.lastMessageAccountId === selfAccountId,
+              }
+            : undefined;
+
+        return {
+          group,
+          name: groupDisplayName(
+            group,
+            groupState.groupProfiles,
+            state.friends,
+            state.selfSteamId,
+          ),
+          avatarUrl: group.avatarUrl,
+          preview,
+          unread: group.unread,
+          lastActivity: group.lastActivity || latest?.lastMessageAt || 0,
+        };
+      })
+      .sort((a, b) => b.lastActivity - a.lastActivity);
+  }, [
+    groupState.groups,
+    groupState.groupProfiles,
+    state.friends,
+    state.selfSteamId,
+  ]);
+
   const value = useMemo<SteamChatContextValue>(
     () => ({
       ...state,
+      ...groupState,
       chats,
+      groupChats,
       ready: state.connection === 'connected' && state.loggedOn,
       sendMessage,
       getEmoticons,
@@ -1295,10 +1900,21 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       markRead,
       sendTyping,
       retryConnection,
+      refreshGroups,
+      openGroup,
+      closeGroup,
+      selectGroupRoom,
+      loadGroupHistory,
+      loadMoreGroupHistory,
+      markGroupRead,
+      sendGroupMessage,
+      sendGroupImage,
     }),
     [
       state,
+      groupState,
       chats,
+      groupChats,
       sendMessage,
       getEmoticons,
       sendImage,
@@ -1309,6 +1925,15 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       markRead,
       sendTyping,
       retryConnection,
+      refreshGroups,
+      openGroup,
+      closeGroup,
+      selectGroupRoom,
+      loadGroupHistory,
+      loadMoreGroupHistory,
+      markGroupRead,
+      sendGroupMessage,
+      sendGroupImage,
     ],
   );
 

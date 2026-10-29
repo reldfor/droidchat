@@ -2,6 +2,7 @@ import { Image } from 'expo-image';
 import { useState } from 'react';
 import { Image as InlineImage, Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
+import { ChatAvatar } from '@/components/chats/chat-avatar';
 import { SteamColors } from '@/constants/steam-theme';
 import type { ChatMessage } from '@/context/steam-chat';
 import { formatMessageTime } from '@/lib/steam/chat-utils';
@@ -9,9 +10,18 @@ import { parseMessageContent, type MessagePart } from '@/lib/steam/chat-media';
 
 type MessageBubbleProps = {
   message: ChatMessage;
+  /** Group rooms show the sender above incoming messages. */
+  authorAvatarUrl?: string | null;
+  authorName?: string;
+  showAuthor?: boolean;
 };
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  authorAvatarUrl,
+  authorName,
+  showAuthor = false,
+}: MessageBubbleProps) {
   const { width } = useWindowDimensions();
   const parts = parseMessageContent(message.content ?? message.text);
   const blocks: MessagePart[][] = [];
@@ -21,6 +31,19 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   }
   return (
     <View style={[styles.row, message.mine ? styles.rowMine : styles.rowTheirs]}>
+      {showAuthor && !message.mine && authorName ? (
+        <View style={styles.authorRow}>
+          <ChatAvatar
+            name={authorName}
+            rounded
+            size={18}
+            uri={authorAvatarUrl ?? undefined}
+          />
+          <Text numberOfLines={1} style={styles.authorName}>
+            {authorName}
+          </Text>
+        </View>
+      ) : null}
       <View
         style={[
           styles.bubble,
@@ -72,6 +95,20 @@ const styles = StyleSheet.create({
   },
   rowTheirs: {
     alignItems: 'flex-start',
+  },
+  authorRow: {
+    maxWidth: '78%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginLeft: 3,
+  },
+  authorName: {
+    flexShrink: 1,
+    color: SteamColors.onlineName,
+    fontSize: 12,
+    lineHeight: 15,
+    letterSpacing: 0.1,
   },
   bubble: {
     gap: 6,

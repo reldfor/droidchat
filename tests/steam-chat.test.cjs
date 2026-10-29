@@ -292,7 +292,7 @@ test('a failed history load offers Retry without claiming the conversation is em
 });
 
 const { decodeEmoticonList, parseMessageContent } = loadSource('src/lib/steam/chat-media.ts');
-const { uploadChatImage, ImageUploadError } = loadSource('src/lib/steam/image-upload.ts');
+const { uploadChatImage, uploadChatRoomImage, ImageUploadError } = loadSource('src/lib/steam/image-upload.ts');
 const { MessageBubble } = loadSource('src/components/chat/message-bubble.tsx');
 const steamImageUrl = 'https://images.steamusercontent.com/ugc/123/ABC/';
 
@@ -385,6 +385,44 @@ test('uploads binary bytes and commits directly to the friend without leaking lo
   assert.equal(commit.body.get('hmac'), beginUpload.hmac);
   assert.equal(commit.body.get('file_sha'), begin.body.get('file_sha'));
   assert.equal(commit.body.get('success'), '1');
+});
+
+test('group image commits target the room instead of a friend', async (t) => {
+  const calls = [];
+  t.mock.method(global, 'fetch', async (url, options) => {
+    calls.push({ url, options });
+    if (calls.length === 1) return Response.json(beginUpload);
+    if (calls.length === 2) return new Response('', { status: 200 });
+    return Response.json({ success: 1, result: { details: { url: steamImageUrl } } });
+  });
+  assert.equal(
+    await uploadChatRoomImage(uploadCredentials, '900719925474099', '12', testImage),
+    steamImageUrl,
+  );
+  assert.equal(calls.length, 3);
+  const commit = calls[2].options;
+  assert.equal(commit.body.get('chat_group_id'), '900719925474099');
+  assert.equal(commit.body.get('chat_id'), '12');
+  assert.equal(commit.body.get('friend_steamid'), null);
+  assert.equal(commit.body.get('spoiler'), '0');
+  assert.equal(commit.body.get('success'), '1');
+});
+
+test('group image uploads reject malformed room ids before contacting Steam', async (t) => {
+  let requests = 0;
+  t.mock.method(global, 'fetch', async () => {
+    requests += 1;
+    throw new Error('Unexpected request');
+  });
+  await assert.rejects(
+    uploadChatRoomImage(uploadCredentials, 'not-a-group', '12', testImage),
+    /group chat could not be found/,
+  );
+  await assert.rejects(
+    uploadChatRoomImage(uploadCredentials, '900719925474099', '', testImage),
+    /group chat could not be found/,
+  );
+  assert.equal(requests, 0);
 });
 
 test('begin failures preserve HTTP/authentication/invalid-response diagnostics and never upload', async (t) => {
@@ -742,4 +780,232 @@ test('a rejected commit is uncertain and is never automatically sent a second ti
   });
   await assert.rejects(uploadChatImage(uploadCredentials, friend, testImage), (error) => error instanceof ImageUploadError && error.uncertain);
   assert.equal(requests, 3);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Group chat                                                                */
+/* -------------------------------------------------------------------------- */
+
+const groupProto = loadSource('src/lib/steam/cm-proto.ts');
+const groupStateModule = loadSource('src/context/group-chat-state.ts');
+
+function groupFixture() {
+  const groupId = '900719925474099';
+  const generalId = '900719925474100';
+  const voiceId = '900719925474101';
+
+  const general = new ProtoWriter()
+    .uint64(1, generalId)
+    .string(2, 'General')
+    .uint32(3, 1)
+    .bytes(4, Uint8Array.from([42, 43]))
+    .uint32(5, 1_700_000_100)
+    .uint32(6, 0)
+    .string(7, '[b]hello[/b]')
+    .uint32(8, 42)
+    .finish();
+  const voice = new ProtoWriter()
+    .uint64(1, voiceId)
+    .string(2, 'Voice lounge')
+    .bool(3, true)
+    .uint32(5, 1_700_000_200)
+    .uint32(6, 1)
+    .string(7, 'anyone here?')
+    .uint32(8, 44)
+    .finish();
+
+  const summary = new ProtoWriter()
+    .uint64(1, groupId)
+    .string(2, 'Test Group')
+    .uint32(3, 5)
+    .uint32(4, 2)
+    .uint64(5, generalId)
+    .bytes(6, general)
+    .bytes(6, voice)
+    .uint32(7, 1234)
+    .string(8, 'Weekend hangout')
+    .uint32(9, 42)
+    // Packed repeated uint32 exercises the packed decoder.
+    .bytes(10, Uint8Array.from([42, 43, 44, 45]))
+    .bytes(11, Uint8Array.from({ length: 20 }, (_, index) => index + 1))
+    .uint32(17, 730)
+    .bool(22, false)
+    .finish();
+
+  const userState = new ProtoWriter()
+    .uint64(1, groupId)
+    .uint32(2, 1_690_000_000)
+    .bytes(
+      3,
+      new ProtoWriter()
+        .uint64(1, generalId)
+        .uint32(2, 1_690_000_000)
+        .uint32(3, 1_700_000_150)
+        .uint32(6, 1_700_000_100)
+        .finish(),
+    )
+    .bytes(
+      3,
+      new ProtoWriter()
+        .uint64(1, voiceId)
+        .uint32(2, 1_690_000_000)
+        .uint32(3, 1_700_000_000)
+        .finish(),
+    )
+    .uint32(6, 1_700_000_150)
+    .bool(7, false)
+    .bool(8, true)
+    .finish();
+
+  const pair = new ProtoWriter()
+    .bytes(1, userState)
+    .bytes(2, summary)
+    .finish();
+
+  const response = new ProtoWriter().bytes(1, pair).finish();
+
+  return { groupId, generalId, voiceId, summary, userState, pair, response };
+}
+
+test('group summaries and user state decode including packed member fields', () => {
+  const fixture = groupFixture();
+  const groups = groupProto.decodeChatRoomGroupsResponse(fixture.response);
+
+  assert.equal(groups.length, 1);
+  const group = groups[0];
+  assert.equal(group.groupSummary.chatGroupId, fixture.groupId);
+  assert.equal(group.groupSummary.name, 'Test Group');
+  assert.equal(group.groupSummary.activeMemberCount, 5);
+  assert.equal(group.groupSummary.tagline, 'Weekend hangout');
+  assert.deepEqual(group.groupSummary.topMembers, [42, 43, 44, 45]);
+  assert.equal(
+    group.groupSummary.avatarSha,
+    '0102030405060708090a0b0c0d0e0f1011121314',
+  );
+  assert.equal(group.groupSummary.chatRooms.length, 2);
+  assert.equal(group.groupSummary.chatRooms[0].name, 'General');
+  assert.deepEqual(group.groupSummary.chatRooms[0].membersInVoice, [42, 43]);
+  assert.equal(group.groupSummary.chatRooms[1].voiceAllowed, true);
+  assert.equal(group.userChatGroupState.userChatRoomStates.length, 2);
+  assert.equal(group.userChatGroupState.userChatRoomStates[0].timeLastAck, 1_700_000_150);
+  assert.equal(group.userChatGroupState.timeLastGroupAck, 1_700_000_150);
+  assert.equal(group.userChatGroupState.directMessagesAllowed, true);
+});
+
+test('group history decodes server messages, deletions and reactions', () => {
+  const reaction = new ProtoWriter()
+    .uint32(1, 1)
+    .string(2, ':steamhappy:')
+    .uint32(3, 4)
+    .bool(4, true)
+    .finish();
+  const message = new ProtoWriter()
+    .uint32(1, 42)
+    .uint32(2, 1_700_000_300)
+    .string(3, '[b]hi[/b]')
+    .uint32(4, 7)
+    .uint32(6, 1)
+    .bytes(7, reaction)
+    .finish();
+  const response = new ProtoWriter().bytes(1, message).bool(4, true).finish();
+
+  const history = groupProto.decodeChatRoomHistoryResponse(response);
+
+  assert.equal(history.moreAvailable, true);
+  assert.equal(history.messages.length, 1);
+  assert.equal(history.messages[0].senderAccountId, 42);
+  assert.equal(history.messages[0].message, '[b]hi[/b]');
+  assert.equal(history.messages[0].ordinal, 7);
+  assert.equal(history.messages[0].deleted, true);
+  assert.equal(history.messages[0].reactions[0].reaction, ':steamhappy:');
+  assert.equal(history.messages[0].reactions[0].numReactors, 4);
+  assert.equal(history.messages[0].reactions[0].hasUserReacted, true);
+});
+
+test('group history request uses the wire field numbers from the app descriptor', () => {
+  const body = groupProto.encodeGetChatRoomHistory({
+    chatGroupId: '900719925474099',
+    chatId: '900719925474100',
+    lastTime: 1_700_000_000,
+    lastOrdinal: 4,
+    startTime: 0,
+    startOrdinal: 0,
+    maxCount: 100,
+  });
+  const fields = readMessage(body);
+
+  assert.equal(asUint64String(firstOf(fields, 1)), '900719925474099');
+  assert.equal(asUint64String(firstOf(fields, 2)), '900719925474100');
+  assert.equal(Number(firstOf(fields, 3).value), 1_700_000_000);
+  assert.equal(Number(firstOf(fields, 4).value), 4);
+  assert.equal(Number(firstOf(fields, 7).value), 100);
+});
+
+test('group reducer merges summaries, room messages and per-room read receipts', () => {
+  const fixture = groupFixture();
+  const groups = groupProto.decodeChatRoomGroupsResponse(fixture.response);
+  const { groupReducer, initialGroupChatState, groupDisplayName } = groupStateModule;
+
+  let state = groupReducer(initialGroupChatState, {
+    type: 'groups',
+    groups,
+  });
+
+  assert.equal(state.groupListLoaded, true);
+  assert.equal(state.groups[fixture.groupId].roomOrder.length, 2);
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.generalId].unread, false);
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.voiceId].unread, true);
+  assert.equal(state.groups[fixture.groupId].unread, true);
+
+  state = groupReducer(state, {
+    type: 'group-open',
+    chatGroupId: fixture.groupId,
+    chatId: fixture.generalId,
+  });
+  assert.equal(state.groups[fixture.groupId].selectedChatId, fixture.generalId);
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.generalId].unread, false);
+  assert.equal(state.groups[fixture.groupId].unread, true);
+
+  state = groupReducer(state, {
+    type: 'group-message',
+    chatGroupId: fixture.groupId,
+    chatId: fixture.generalId,
+    mine: false,
+    incoming: { chatName: 'Test Group' },
+    message: {
+      id: 'gm-1',
+      authorSteamId: friend,
+      text: 'fresh message',
+      content: 'fresh message',
+      sentAt: 1_700_000_400,
+      ordinal: 8,
+      mine: false,
+    },
+  });
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.generalId].messages.length, 1);
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.generalId].unread, false);
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.generalId].lastMessage, 'fresh message');
+
+  state = groupReducer(state, {
+    type: 'group-ack',
+    chatGroupId: fixture.groupId,
+    chatId: fixture.generalId,
+    timestamp: 1_700_000_400,
+  });
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.generalId].unread, false);
+  // Reading General must not mark the other room read.
+  assert.equal(state.groups[fixture.groupId].rooms[fixture.voiceId].unread, true);
+
+  const display = groupDisplayName(
+    { ...state.groups[fixture.groupId], name: '' },
+    {
+      '76561197960265770': { name: 'Alpha', avatarUrl: null },
+      '76561197960265771': { name: 'Bravo', avatarUrl: null },
+      '76561197960265772': { name: 'Charlie', avatarUrl: null },
+      '76561197960265773': { name: 'Delta', avatarUrl: null },
+    },
+    {},
+    null,
+  );
+  assert.equal(display, 'Alpha, Bravo, Charlie +1');
 });

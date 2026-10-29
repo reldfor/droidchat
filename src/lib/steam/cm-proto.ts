@@ -9,7 +9,9 @@
 import { bytesToHex } from './bytes';
 import {
   ProtoWriter,
+  allNumbers,
   allOf,
+  allUint64Strings,
   asBoolean,
   asBytes,
   asNumber,
@@ -508,6 +510,534 @@ export function decodeMessageSessions(bytes: Uint8Array): MessageSessionsRespons
       };
     }),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Chat rooms and group chats                                                 */
+/* -------------------------------------------------------------------------- */
+
+export type ChatRoomState = {
+  chatId: string;
+  name: string;
+  voiceAllowed: boolean;
+  membersInVoice: number[];
+  timeLastMessage: number;
+  sortOrder: number;
+  lastMessage: string;
+  accountIdLastMessage: number;
+};
+
+export type ChatRoomGroupHeaderState = {
+  chatGroupId: string;
+  name: string;
+  clanId: number;
+  accountIdOwner: number;
+  tagline: string;
+  avatarSha: string | null;
+  appId: number;
+  avatarUgcUrl: string;
+  disabled: boolean;
+};
+
+export type ChatRoomMember = {
+  accountId: number;
+  state: number;
+  rank: number;
+  timeKickExpire: number;
+  roleIds: string[];
+};
+
+export type ChatRoomGroupState = {
+  headerState: ChatRoomGroupHeaderState;
+  members: ChatRoomMember[];
+  defaultChatId: string;
+  chatRooms: ChatRoomState[];
+  kicked: ChatRoomMember[];
+};
+
+export type ChatRoomUserRoomState = {
+  chatId: string;
+  timeJoined: number;
+  timeLastAck: number;
+  desktopNotificationLevel: number;
+  mobileNotificationLevel: number;
+  timeLastMention: number;
+  unreadIndicatorMuted: boolean;
+  timeFirstUnread: number;
+};
+
+export type ChatRoomUserGroupState = {
+  chatGroupId: string;
+  timeJoined: number;
+  userChatRoomStates: ChatRoomUserRoomState[];
+  desktopNotificationLevel: number;
+  mobileNotificationLevel: number;
+  timeLastGroupAck: number;
+  unreadIndicatorMuted: boolean;
+  directMessagesAllowed: boolean;
+};
+
+export type ChatRoomGroupSummary = {
+  chatGroupId: string;
+  name: string;
+  activeMemberCount: number;
+  activeVoiceMemberCount: number;
+  defaultChatId: string;
+  chatRooms: ChatRoomState[];
+  clanId: number;
+  tagline: string;
+  accountIdOwner: number;
+  topMembers: number[];
+  avatarSha: string | null;
+  rank: number;
+  appId: number;
+  avatarUgcUrl: string;
+  disabled: boolean;
+};
+
+export type ChatRoomSummaryPair = {
+  groupSummary: ChatRoomGroupSummary;
+  userChatGroupState: ChatRoomUserGroupState;
+};
+
+export type ChatRoomMessageReaction = {
+  reactionType: number;
+  reaction: string;
+  numReactors: number;
+  hasUserReacted: boolean;
+};
+
+export type ChatRoomHistoryMessage = {
+  senderAccountId: number;
+  timestamp: number;
+  message: string;
+  ordinal: number;
+  serverMessage: number;
+  deleted: boolean;
+  reactions: ChatRoomMessageReaction[];
+};
+
+export type ChatRoomHistoryResponse = {
+  messages: ChatRoomHistoryMessage[];
+  moreAvailable: boolean;
+};
+
+export type SendChatRoomMessageResponse = {
+  modifiedMessage: string;
+  serverTimestamp: number;
+  ordinal: number;
+  messageWithoutBbcode: string;
+};
+
+export type IncomingChatRoomMessage = {
+  chatGroupId: string;
+  chatId: string;
+  senderSteamId: string;
+  message: string;
+  timestamp: number;
+  ordinal: number;
+  serverMessage: number;
+  messageNoBbcode: string;
+  chatName: string;
+  notificationKey: string;
+};
+
+export type ChatRoomAckEcho = {
+  chatGroupId: string;
+  chatId: string;
+  timestamp: number;
+};
+
+export type ChatRoomGroupUserStateNotification = {
+  chatGroupId: string;
+  userChatGroupState: ChatRoomUserGroupState;
+  groupSummary: ChatRoomGroupSummary;
+  userAction: number;
+};
+
+export type ChatRoomGroupRoomsChange = {
+  chatGroupId: string;
+  defaultChatId: string;
+  chatRooms: ChatRoomState[];
+};
+
+export type ChatRoomMessageModified = {
+  chatGroupId: string;
+  chatId: string;
+  deleted: { timestamp: number; ordinal: number; deleted: boolean }[];
+};
+
+export type PlayerProfile = {
+  steamId: string;
+  personaName: string;
+  avatarHash: string | null;
+  profileUrl: string;
+};
+
+function decodeChatRoomState(bytes: Uint8Array): ChatRoomState {
+  const fields = readMessage(bytes);
+
+  return {
+    chatId: asUint64String(firstOf(fields, 1)),
+    name: asString(firstOf(fields, 2)),
+    voiceAllowed: asBoolean(firstOf(fields, 3)),
+    membersInVoice: allNumbers(fields, 4),
+    timeLastMessage: asNumber(firstOf(fields, 5)),
+    sortOrder: asNumber(firstOf(fields, 6)),
+    lastMessage: asString(firstOf(fields, 7)),
+    accountIdLastMessage: asNumber(firstOf(fields, 8)),
+  };
+}
+
+function decodeChatRoomGroupHeaderState(bytes: Uint8Array): ChatRoomGroupHeaderState {
+  const fields = readMessage(bytes);
+  const avatar = asBytes(firstOf(fields, 16));
+  const avatarUgcUrl = asString(firstOf(fields, 25));
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    name: asString(firstOf(fields, 2)),
+    clanId: asNumber(firstOf(fields, 13)),
+    accountIdOwner: asNumber(firstOf(fields, 14)),
+    tagline: asString(firstOf(fields, 15)),
+    avatarSha: avatar.length > 0 ? bytesToHex(avatar) : null,
+    appId: asNumber(firstOf(fields, 21)),
+    avatarUgcUrl,
+    disabled: asBoolean(firstOf(fields, 26)),
+  };
+}
+
+function decodeChatRoomMember(bytes: Uint8Array): ChatRoomMember {
+  const fields = readMessage(bytes);
+
+  return {
+    accountId: asNumber(firstOf(fields, 1)),
+    state: asNumber(firstOf(fields, 3)),
+    rank: asNumber(firstOf(fields, 4)),
+    timeKickExpire: asNumber(firstOf(fields, 6)),
+    roleIds: allUint64Strings(fields, 7),
+  };
+}
+
+export function decodeChatRoomGroupState(bytes: Uint8Array): ChatRoomGroupState {
+  const fields = readMessage(bytes);
+
+  return {
+    headerState: decodeChatRoomGroupHeaderState(asBytes(firstOf(fields, 1))),
+    members: allOf(fields, 2).map((entry) => decodeChatRoomMember(asBytes(entry))),
+    defaultChatId: asUint64String(firstOf(fields, 4)),
+    chatRooms: allOf(fields, 5).map((entry) => decodeChatRoomState(asBytes(entry))),
+    kicked: allOf(fields, 7).map((entry) => decodeChatRoomMember(asBytes(entry))),
+  };
+}
+
+function decodeChatRoomUserRoomState(bytes: Uint8Array): ChatRoomUserRoomState {
+  const fields = readMessage(bytes);
+
+  return {
+    chatId: asUint64String(firstOf(fields, 1)),
+    timeJoined: asNumber(firstOf(fields, 2)),
+    timeLastAck: asNumber(firstOf(fields, 3)),
+    desktopNotificationLevel: asNumber(firstOf(fields, 4)),
+    mobileNotificationLevel: asNumber(firstOf(fields, 5)),
+    timeLastMention: asNumber(firstOf(fields, 6)),
+    unreadIndicatorMuted: asBoolean(firstOf(fields, 7)),
+    timeFirstUnread: asNumber(firstOf(fields, 8)),
+  };
+}
+
+export function decodeChatRoomUserGroupState(bytes: Uint8Array): ChatRoomUserGroupState {
+  const fields = readMessage(bytes);
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    timeJoined: asNumber(firstOf(fields, 2)),
+    userChatRoomStates: allOf(fields, 3).map((entry) =>
+      decodeChatRoomUserRoomState(asBytes(entry)),
+    ),
+    desktopNotificationLevel: asNumber(firstOf(fields, 4)),
+    mobileNotificationLevel: asNumber(firstOf(fields, 5)),
+    timeLastGroupAck: asNumber(firstOf(fields, 6)),
+    unreadIndicatorMuted: asBoolean(firstOf(fields, 7)),
+    directMessagesAllowed: asBoolean(firstOf(fields, 8)),
+  };
+}
+
+export function decodeChatRoomGroupSummary(bytes: Uint8Array): ChatRoomGroupSummary {
+  const fields = readMessage(bytes);
+  const avatar = asBytes(firstOf(fields, 11));
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    name: asString(firstOf(fields, 2)),
+    activeMemberCount: asNumber(firstOf(fields, 3)),
+    activeVoiceMemberCount: asNumber(firstOf(fields, 4)),
+    defaultChatId: asUint64String(firstOf(fields, 5)),
+    chatRooms: allOf(fields, 6).map((entry) => decodeChatRoomState(asBytes(entry))),
+    clanId: asNumber(firstOf(fields, 7)),
+    tagline: asString(firstOf(fields, 8)),
+    accountIdOwner: asNumber(firstOf(fields, 9)),
+    topMembers: allNumbers(fields, 10),
+    avatarSha: avatar.length > 0 ? bytesToHex(avatar) : null,
+    rank: asNumber(firstOf(fields, 12)),
+    appId: asNumber(firstOf(fields, 17)),
+    avatarUgcUrl: asString(firstOf(fields, 21)),
+    disabled: asBoolean(firstOf(fields, 22)),
+  };
+}
+
+function decodeChatRoomSummaryPair(bytes: Uint8Array): ChatRoomSummaryPair {
+  const fields = readMessage(bytes);
+
+  return {
+    userChatGroupState: decodeChatRoomUserGroupState(asBytes(firstOf(fields, 1))),
+    groupSummary: decodeChatRoomGroupSummary(asBytes(firstOf(fields, 2))),
+  };
+}
+
+/** `ChatRoom.GetMyChatRoomGroups#1` takes an empty request body. */
+export function decodeChatRoomGroupsResponse(bytes: Uint8Array): ChatRoomSummaryPair[] {
+  return allOf(readMessage(bytes), 1).map((entry) =>
+    decodeChatRoomSummaryPair(asBytes(entry)),
+  );
+}
+
+export function encodeGetChatRoomGroupState(chatGroupId: string): Uint8Array {
+  return new ProtoWriter().uint64(1, chatGroupId).finish();
+}
+
+export function decodeGetChatRoomGroupStateResponse(bytes: Uint8Array): ChatRoomGroupState {
+  return decodeChatRoomGroupState(asBytes(firstOf(readMessage(bytes), 1)));
+}
+
+export type ChatRoomHistoryInput = {
+  chatGroupId: string;
+  chatId: string;
+  lastTime: number;
+  lastOrdinal: number;
+  startTime: number;
+  startOrdinal: number;
+  maxCount: number;
+};
+
+export function encodeGetChatRoomHistory(input: ChatRoomHistoryInput): Uint8Array {
+  return new ProtoWriter()
+    .uint64(1, input.chatGroupId)
+    .uint64(2, input.chatId)
+    .uint32(3, input.lastTime >>> 0)
+    .uint32(4, input.lastOrdinal)
+    .uint32(5, input.startTime >>> 0)
+    .uint32(6, input.startOrdinal)
+    .uint32(7, input.maxCount)
+    .finish();
+}
+
+function decodeChatRoomReaction(bytes: Uint8Array): ChatRoomMessageReaction {
+  const fields = readMessage(bytes);
+
+  return {
+    reactionType: asNumber(firstOf(fields, 1)),
+    reaction: asString(firstOf(fields, 2)),
+    numReactors: asNumber(firstOf(fields, 3)),
+    hasUserReacted: asBoolean(firstOf(fields, 4)),
+  };
+}
+
+function decodeChatRoomHistoryMessage(bytes: Uint8Array): ChatRoomHistoryMessage {
+  const fields = readMessage(bytes);
+  const serverMessage = readMessage(asBytes(firstOf(fields, 5)));
+
+  return {
+    senderAccountId: asNumber(firstOf(fields, 1)),
+    timestamp: asNumber(firstOf(fields, 2)),
+    message: asString(firstOf(fields, 3)),
+    ordinal: asNumber(firstOf(fields, 4)),
+    serverMessage: asNumber(firstOf(serverMessage, 1)),
+    deleted: asBoolean(firstOf(fields, 6)),
+    reactions: allOf(fields, 7).map((entry) => decodeChatRoomReaction(asBytes(entry))),
+  };
+}
+
+export function decodeChatRoomHistoryResponse(bytes: Uint8Array): ChatRoomHistoryResponse {
+  const fields = readMessage(bytes);
+
+  return {
+    messages: allOf(fields, 1).map((entry) =>
+      decodeChatRoomHistoryMessage(asBytes(entry)),
+    ),
+    moreAvailable: asBoolean(firstOf(fields, 4)),
+  };
+}
+
+export function encodeSendChatRoomMessage(input: {
+  chatGroupId: string;
+  chatId: string;
+  message: string;
+  echoToSender: boolean;
+}): Uint8Array {
+  return new ProtoWriter()
+    .uint64(1, input.chatGroupId)
+    .uint64(2, input.chatId)
+    .string(3, input.message)
+    .bool(4, input.echoToSender)
+    .finish();
+}
+
+export function decodeSendChatRoomMessageResponse(
+  bytes: Uint8Array,
+): SendChatRoomMessageResponse {
+  const fields = readMessage(bytes);
+
+  return {
+    modifiedMessage: asString(firstOf(fields, 1)),
+    serverTimestamp: asNumber(firstOf(fields, 2)),
+    ordinal: asNumber(firstOf(fields, 3)),
+    messageWithoutBbcode: asString(firstOf(fields, 4)),
+  };
+}
+
+export function decodeIncomingChatRoomMessage(
+  bytes: Uint8Array,
+): IncomingChatRoomMessage {
+  const fields = readMessage(bytes);
+  const serverMessage = readMessage(asBytes(firstOf(fields, 8)));
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    chatId: asUint64String(firstOf(fields, 2)),
+    senderSteamId: asUint64String(firstOf(fields, 3)),
+    message: asString(firstOf(fields, 4)),
+    timestamp: asNumber(firstOf(fields, 5)),
+    ordinal: asNumber(firstOf(fields, 7)),
+    serverMessage: asNumber(firstOf(serverMessage, 1)),
+    messageNoBbcode: asString(firstOf(fields, 9)),
+    chatName: asString(firstOf(fields, 10)),
+    notificationKey: asString(firstOf(fields, 11)),
+  };
+}
+
+export function encodeAckChatRoomMessage(input: {
+  chatGroupId: string;
+  chatId: string;
+  timestamp: number;
+}): Uint8Array {
+  return new ProtoWriter()
+    .uint64(1, input.chatGroupId)
+    .uint64(2, input.chatId)
+    .uint32(3, input.timestamp >>> 0)
+    .finish();
+}
+
+export function decodeChatRoomAckEcho(bytes: Uint8Array): ChatRoomAckEcho {
+  const fields = readMessage(bytes);
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    chatId: asUint64String(firstOf(fields, 2)),
+    timestamp: asNumber(firstOf(fields, 3)),
+  };
+}
+
+export function encodeSetActiveChatRoomGroups(input: {
+  chatGroupIds: string[];
+  requestGroupData?: string[];
+}): Uint8Array {
+  const writer = new ProtoWriter();
+
+  for (const chatGroupId of input.chatGroupIds) {
+    writer.uint64(1, chatGroupId);
+  }
+
+  for (const chatGroupId of input.requestGroupData ?? []) {
+    writer.uint64(2, chatGroupId);
+  }
+
+  return writer.finish();
+}
+
+export function decodeSetActiveChatRoomGroupsResponse(bytes: Uint8Array): ChatRoomGroupState[] {
+  return allOf(readMessage(bytes), 1).map((entry) =>
+    decodeChatRoomGroupState(asBytes(entry)),
+  );
+}
+
+export function decodeChatRoomGroupUserStateNotification(
+  bytes: Uint8Array,
+): ChatRoomGroupUserStateNotification {
+  const fields = readMessage(bytes);
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    userChatGroupState: decodeChatRoomUserGroupState(asBytes(firstOf(fields, 2))),
+    groupSummary: decodeChatRoomGroupSummary(asBytes(firstOf(fields, 3))),
+    userAction: asNumber(firstOf(fields, 4)),
+  };
+}
+
+export function decodeChatRoomHeaderStateNotification(
+  bytes: Uint8Array,
+): ChatRoomGroupHeaderState {
+  return decodeChatRoomGroupHeaderState(asBytes(firstOf(readMessage(bytes), 1)));
+}
+
+export function decodeChatRoomGroupRoomsChange(
+  bytes: Uint8Array,
+): ChatRoomGroupRoomsChange {
+  const fields = readMessage(bytes);
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    defaultChatId: asUint64String(firstOf(fields, 2)),
+    chatRooms: allOf(fields, 3).map((entry) => decodeChatRoomState(asBytes(entry))),
+  };
+}
+
+export function decodeChatRoomMessageModified(bytes: Uint8Array): ChatRoomMessageModified {
+  const fields = readMessage(bytes);
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    chatId: asUint64String(firstOf(fields, 2)),
+    deleted: allOf(fields, 3).map((entry) => {
+      const message = readMessage(asBytes(entry));
+
+      return {
+        timestamp: asNumber(firstOf(message, 1)),
+        ordinal: asNumber(firstOf(message, 2)),
+        deleted: asBoolean(firstOf(message, 3)),
+      };
+    }),
+  };
+}
+
+/** `Player.GetPlayerLinkDetails#1` resolves persona names for group members. */
+export function encodeGetPlayerLinkDetails(steamIds: string[]): Uint8Array {
+  const writer = new ProtoWriter();
+
+  for (const steamId of steamIds) {
+    writer.uint64(1, steamId);
+  }
+
+  return writer.finish();
+}
+
+export function decodePlayerLinkDetailsResponse(bytes: Uint8Array): PlayerProfile[] {
+  const profiles: PlayerProfile[] = [];
+
+  for (const entry of allOf(readMessage(bytes), 1)) {
+    const details = readMessage(asBytes(entry));
+    const publicData = readMessage(asBytes(firstOf(details, 1)));
+    const avatar = asBytes(firstOf(publicData, 9));
+
+    profiles.push({
+      steamId: asUint64String(firstOf(publicData, 1)),
+      personaName: asString(firstOf(publicData, 10)),
+      avatarHash: avatar.length > 0 ? bytesToHex(avatar) : null,
+      profileUrl: asString(firstOf(publicData, 11)),
+    });
+  }
+
+  return profiles;
 }
 
 /* -------------------------------------------------------------------------- */
