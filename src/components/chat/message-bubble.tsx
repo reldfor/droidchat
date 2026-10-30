@@ -1,9 +1,11 @@
 import { Image } from 'expo-image';
+import { SymbolView } from 'expo-symbols';
 import { useState } from 'react';
 import { Image as InlineImage, Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { ChatAvatar } from '@/components/chats/chat-avatar';
 import { SteamColors } from '@/constants/steam-theme';
+import { useSettings, type MediaHiddenReason } from '@/context/settings';
 import type { ChatMessage } from '@/context/steam-chat';
 import { formatMessageTime } from '@/lib/steam/chat-utils';
 import { parseMessageContent, type MessagePart } from '@/lib/steam/chat-media';
@@ -23,6 +25,8 @@ export function MessageBubble({
   showAuthor = false,
 }: MessageBubbleProps) {
   const { width } = useWindowDimensions();
+  const { mediaHiddenReason } = useSettings();
+  const mediaHidden = mediaHiddenReason !== null;
   const parts = parseMessageContent(message.content ?? message.text);
   const blocks: MessagePart[][] = [];
   for (const part of parts) {
@@ -52,10 +56,30 @@ export function MessageBubble({
           message.failed && styles.failed,
         ]}>
         {blocks.map((block, index) => block[0].type === 'image' ? (
-          <ChatImage key={index} part={block[0]} width={Math.min(260, Math.max(120, width * 0.78 - 48))} />
+          <ChatImage
+            key={index}
+            hidden={mediaHidden}
+            hiddenReason={mediaHiddenReason}
+            part={block[0]}
+            width={Math.min(260, Math.max(120, width * 0.78 - 48))}
+          />
         ) : (
           <Text key={index} selectable style={styles.text}>
-            {block.map((part, partIndex) => part.type === 'text' ? part.text : part.type === 'emoticon' ? <InlineEmoticon key={partIndex} name={part.name} url={part.url} /> : null)}
+            {block.map((part, partIndex) => {
+              if (part.type === 'text') {
+                return part.text;
+              }
+
+              if (part.type !== 'emoticon') {
+                return null;
+              }
+
+              return mediaHidden ? (
+                <Text key={partIndex}>:{part.name}:</Text>
+              ) : (
+                <InlineEmoticon key={partIndex} name={part.name} url={part.url} />
+              );
+            })}
           </Text>
         ))}
       </View>
@@ -77,10 +101,43 @@ function InlineEmoticon({ name, url }: { name: string; url: string }) {
   return failed ? <Text>:{name}:</Text> : <InlineImage accessibilityLabel={`:${name}:`} source={{ uri: url }} onError={() => setFailed(true)} resizeMode="contain" style={styles.emoticon} />;
 }
 
-function ChatImage({ part, width }: { part: Extract<MessagePart, { type: 'image' }>; width: number }) {
+function ChatImage({
+  part,
+  width,
+  hidden,
+  hiddenReason,
+}: {
+  part: Extract<MessagePart, { type: 'image' }>;
+  width: number;
+  hidden: boolean;
+  hiddenReason: MediaHiddenReason;
+}) {
   const [failed, setFailed] = useState(false);
   const ratio = part.width && part.height ? Math.max(0.4, Math.min(3, part.width / part.height)) : 4 / 3;
-  return <Pressable accessibilityRole="link" accessibilityLabel="Open shared image" onPress={() => { void Linking.openURL(part.url).catch(() => setFailed(true)); }}>
+  const open = () => {
+    void Linking.openURL(part.url).catch(() => setFailed(true));
+  };
+
+  if (hidden) {
+    const label = hiddenReason === 'wifi' ? 'Image hidden on mobile data' : 'Image hidden';
+
+    return (
+      <Pressable
+        accessibilityLabel={`${label}. Open shared image`}
+        accessibilityRole="link"
+        onPress={open}
+        style={[styles.imageHidden, { width }]}>
+        <SymbolView
+          name={{ ios: 'photo', android: 'image', web: 'image' }}
+          size={18}
+          tintColor={SteamColors.muted}
+        />
+        <Text style={styles.imageHiddenText}>{label}</Text>
+      </Pressable>
+    );
+  }
+
+  return <Pressable accessibilityRole="link" accessibilityLabel="Open shared image" onPress={open}>
     {failed ? <View style={[styles.imageFallback, { width }]}><Text style={styles.text}>Image unavailable. Tap to open.</Text></View> : <Image accessibilityLabel="Shared image" source={{ uri: part.thumbnailUrl ?? part.url }} contentFit="contain" onError={() => setFailed(true)} style={[styles.image, { width, aspectRatio: ratio }]} />}
   </Pressable>;
 }
@@ -139,6 +196,22 @@ const styles = StyleSheet.create({
   },
   emoticon: { width: 22, height: 22 },
   image: { borderRadius: 4, backgroundColor: SteamColors.chromeDeep },
+  imageHidden: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 4,
+    backgroundColor: SteamColors.chromeDeep,
+  },
+  imageHiddenText: {
+    flexShrink: 1,
+    color: SteamColors.muted,
+    fontSize: 13,
+    lineHeight: 18,
+  },
   imageFallback: { minHeight: 100, justifyContent: 'center', padding: 12, backgroundColor: SteamColors.chromeDeep },
   meta: {
     flexDirection: 'row',

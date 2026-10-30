@@ -2,6 +2,7 @@ import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 
 import { SessionProvider } from '@/context/session';
+import { SettingsProvider } from '@/context/settings';
 import { SteamChatProvider } from '@/context/steam-chat';
 
 const appTheme = {
@@ -17,18 +18,20 @@ const appTheme = {
 
 export default function RootLayout() {
   return (
-    <SessionProvider>
-      <SteamChatProvider>
-        <ThemeProvider value={appTheme}>
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: appTheme.colors.background },
-            }}
-          />
-          <StatusBar style="light" />
-        </ThemeProvider>
-      </SteamChatProvider>
-    </SessionProvider>
+    <SettingsProvider>
+      <SessionProvider>
+        <SteamChatProvider>
+          <ThemeProvider value={appTheme}>
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: appTheme.colors.background },
+              }}
+            />
+            <StatusBar style="light" />
+          </ThemeProvider>
+        </SteamChatProvider>
+      </SessionProvider>
+    </SettingsProvider>
   );
 }

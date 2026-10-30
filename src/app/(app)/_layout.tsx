@@ -1,14 +1,47 @@
-import { Redirect, Tabs } from 'expo-router';
+import { Redirect, Tabs, usePathname, useRootNavigationState, useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
+import { useEffect, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SteamColors } from '@/constants/steam-theme';
 import { useSession } from '@/context/session';
+import { useSettings } from '@/context/settings';
+
+const defaultTabHref = {
+  friends: '/friends',
+  chats: '/chats',
+  groups: '/groups',
+} as const;
 
 export default function AppTabsLayout() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const pathname = usePathname();
+  const rootNavigationState = useRootNavigationState();
   const { status } = useSession();
+  const { settings, hydrated } = useSettings();
+  const appliedDefaultTab = useRef(false);
+
+  // Expo Router does not expose a dynamic initialRouteName for Tabs. Apply the
+  // saved default once on a cold start when the navigator lands on its first tab.
+  useEffect(() => {
+    if (
+      status !== 'signed-in' ||
+      !hydrated ||
+      !rootNavigationState?.key ||
+      appliedDefaultTab.current ||
+      !pathname
+    ) {
+      return;
+    }
+
+    appliedDefaultTab.current = true;
+
+    if (pathname === '/friends' && settings.defaultTab !== 'friends') {
+      router.replace(defaultTabHref[settings.defaultTab]);
+    }
+  }, [hydrated, pathname, rootNavigationState?.key, router, settings.defaultTab, status]);
 
   if (status === 'loading') {
     return <View style={styles.loading} />;

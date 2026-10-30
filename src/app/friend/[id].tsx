@@ -46,6 +46,17 @@ export default function FriendChatScreen() {
   const conversation = steamId ? conversations[steamId] : undefined;
   const friendTyping = steamId ? Boolean(typing[steamId]) : false;
   const lastMessageAt = conversation?.messages[conversation.messages.length - 1]?.sentAt ?? 0;
+  const lastActivity = conversation?.lastActivity ?? 0;
+
+  // Revalidate cached history when opening the chat or when Steam reports
+  // newer activity (for example a session loaded after a reconnect).
+  useEffect(() => {
+    if (!steamId) {
+      return;
+    }
+
+    loadConversation(steamId);
+  }, [steamId, lastActivity, loadConversation]);
 
   // Read receipts: ack once history is on screen and whenever a new message
   // arrives while the conversation is open.

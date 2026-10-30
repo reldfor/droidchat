@@ -91,6 +91,11 @@ export function AccountDrawer({ visible, onClose }: AccountDrawerProps) {
     router.push('/add-account');
   };
 
+  const handleSettings = () => {
+    handleClose();
+    router.push('/settings');
+  };
+
   const handleAccountPress = () => {
     if (accounts.length > 1) {
       setView('accounts');
@@ -229,6 +234,35 @@ export function AccountDrawer({ visible, onClose }: AccountDrawerProps) {
                     </Pressable>
                   );
                 })}
+              </View>
+
+              <View style={styles.settingsGroup}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: pathname.startsWith('/settings') }}
+                  onPress={handleSettings}
+                  style={({ pressed }) => [
+                    styles.navItem,
+                    pathname.startsWith('/settings') && styles.navItemActive,
+                    pressed && styles.pressed,
+                  ]}>
+                  <SymbolView
+                    name={{ ios: 'gearshape.fill', android: 'settings', web: 'settings' }}
+                    size={20}
+                    tintColor={
+                      pathname.startsWith('/settings')
+                        ? SteamColors.textStrong
+                        : SteamColors.iconMuted
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.navLabel,
+                      pathname.startsWith('/settings') && styles.navLabelActive,
+                    ]}>
+                    Settings
+                  </Text>
+                </Pressable>
               </View>
 
               <View style={styles.spacer} />
@@ -390,6 +424,12 @@ const styles = StyleSheet.create({
   navGroup: {
     marginTop: 22,
     gap: 2,
+  },
+  settingsGroup: {
+    marginTop: 14,
+    paddingTop: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#33363D',
   },
   navItem: {
     minHeight: 46,

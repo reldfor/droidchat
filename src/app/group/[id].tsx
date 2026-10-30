@@ -54,6 +54,7 @@ export default function GroupChatScreen() {
   const openRoomId = room?.chatId;
   const roomLoaded = room?.loaded ?? false;
   const roomLoading = room?.loading ?? false;
+  const roomLastMessageAt = room?.lastMessageAt ?? 0;
 
   useEffect(() => {
     if (!openChatGroupId || !openRoomId || lastMessageAt <= 0) {
@@ -62,6 +63,16 @@ export default function GroupChatScreen() {
 
     markGroupRead(openChatGroupId, openRoomId, lastMessageAt);
   }, [openChatGroupId, openRoomId, lastMessageAt, markGroupRead]);
+
+  // Cached room history paints immediately. Refresh it when the group summary
+  // reports a newer message (desktop activity) or when the cache is old.
+  useEffect(() => {
+    if (!openChatGroupId || !openRoomId) {
+      return;
+    }
+
+    loadGroupHistory(openChatGroupId, openRoomId);
+  }, [openChatGroupId, openRoomId, roomLastMessageAt, loadGroupHistory]);
 
   // A direct link can open the route before the group list has arrived.
   useEffect(() => {

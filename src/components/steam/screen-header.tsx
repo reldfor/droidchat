@@ -8,13 +8,23 @@ type ScreenHeaderProps = {
   backLabel?: string;
   onBack: () => void;
   title: string;
+  /**
+   * Settings screens sit on the chrome list surface and use a canvas header
+   * without a separator. Chat screens keep the default chrome header.
+   */
+  tone?: 'chrome' | 'canvas';
 };
 
-export function ScreenHeader({ backLabel = 'Go back', onBack, title }: ScreenHeaderProps) {
+export function ScreenHeader({
+  backLabel = 'Go back',
+  onBack,
+  title,
+  tone = 'chrome',
+}: ScreenHeaderProps) {
   const insets = useSafeAreaInsets();
 
   return (
-    <View style={styles.shell}>
+    <View style={[styles.shell, tone === 'canvas' && styles.shellCanvas]}>
       <View style={{ height: insets.top }} />
 
       <View style={styles.row}>
@@ -47,6 +57,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: SteamColors.border,
     zIndex: 10,
+  },
+  shellCanvas: {
+    backgroundColor: SteamColors.canvas,
+    borderBottomWidth: 0,
   },
   row: {
     width: '100%',

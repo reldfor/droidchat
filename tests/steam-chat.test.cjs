@@ -56,6 +56,8 @@ function loadSource(relativePath, overrides = {}, cache = Object.keys(overrides)
     if (specifier === 'expo-image-picker') return { launchImageLibraryAsync: async () => ({ canceled: true, assets: null }) };
     if (specifier === 'expo-image-manipulator') return { ImageManipulator: {}, SaveFormat: { PNG: 'png', JPEG: 'jpeg' } };
     if (specifier === 'expo-file-system') return { File: class {} };
+    if (specifier === 'expo-network') return { useNetworkState: () => ({}), NetworkStateType: { WIFI: 'WIFI' } };
+    if (specifier === 'expo-secure-store') return { getItemAsync: async () => null, setItemAsync: async () => {}, deleteItemAsync: async () => {} };
     if (!specifier.startsWith('.') && !specifier.startsWith('@/')) return nativeRequire(specifier);
     const base = specifier.startsWith('@/')
       ? path.join(root, 'src', specifier.slice(2))
@@ -294,6 +296,7 @@ test('a failed history load offers Retry without claiming the conversation is em
 const { decodeEmoticonList, parseMessageContent } = loadSource('src/lib/steam/chat-media.ts');
 const { uploadChatImage, uploadChatRoomImage, ImageUploadError } = loadSource('src/lib/steam/image-upload.ts');
 const { MessageBubble } = loadSource('src/components/chat/message-bubble.tsx');
+const { DEFAULT_INTERFACE_SETTINGS, normalizeInterfaceSettings } = loadSource('src/lib/settings.ts');
 const steamImageUrl = 'https://images.steamusercontent.com/ugc/123/ABC/';
 
 test('loads the current account emoticons over the authenticated CM service', async (t) => {
@@ -1008,4 +1011,364 @@ test('group reducer merges summaries, room messages and per-room read receipts',
     null,
   );
   assert.equal(display, 'Alpha, Bravo, Charlie +1');
+});
+
+test('interface settings normalize unknown storage without losing valid preferences', () => {
+  assert.deepEqual(normalizeInterfaceSettings(null), DEFAULT_INTERFACE_SETTINGS);
+  assert.equal(DEFAULT_INTERFACE_SETTINGS.saveImageCaptures, true);
+  assert.equal(DEFAULT_INTERFACE_SETTINGS.defaultTab, 'chats');
+  assert.equal(DEFAULT_INTERFACE_SETTINGS.chatFilter, 'friends');
+
+  const normalized = normalizeInterfaceSettings({
+    appendNicknames: true,
+    hideOfflineCustomCategories: 'yes',
+    disableMediaEmbedding: true,
+    saveImageCaptures: false,
+    chatFilter: 'everyone',
+    language: 'en',
+    defaultTab: 'groups',
+  });
+
+  assert.equal(normalized.appendNicknames, true);
+  assert.equal(normalized.hideOfflineCustomCategories, false);
+  assert.equal(normalized.disableMediaEmbedding, true);
+  assert.equal(normalized.saveImageCaptures, false);
+  assert.equal(normalized.chatFilter, 'everyone');
+  assert.equal(normalized.language, 'en');
+  assert.equal(normalized.defaultTab, 'groups');
+});
+
+test('interface settings reject unknown enum values', () => {
+  const normalized = normalizeInterfaceSettings({
+    chatFilter: 'everyone-i-know',
+    language: 'xx',
+    defaultTab: 'settings',
+  });
+
+  assert.equal(normalized.chatFilter, 'friends');
+  assert.equal(normalized.language, 'en');
+  assert.equal(normalized.defaultTab, 'chats');
+});
+
+/* -------------------------------------------------------------------------- */
+/* Local chat cache                                                           */
+/* -------------------------------------------------------------------------- */
+
+const chatCache = loadSource('src/lib/steam/chat-cache.ts');
+const chatCacheUsage = loadSource('src/lib/steam/chat-cache-usage.ts');
+
+function cachedMessage(overrides = {}) {
+  return {
+    id: 'h-6-1700000000-2',
+    authorSteamId: friend,
+    text: 'older',
+    content: 'older',
+    sentAt: 1700000000,
+    ordinal: 6,
+    mine: false,
+    ...overrides,
+  };
+}
+
+function cachedConversation(overrides = {}) {
+  return {
+    steamId: friend,
+    messages: [cachedMessage()],
+    loaded: true,
+    loading: false,
+    hasMore: false,
+    oldestTime: 1700000000,
+    oldestOrdinal: 6,
+    lastActivity: 1700000000,
+    unread: 0,
+    syncedAt: 1700000000000,
+    ...overrides,
+  };
+}
+
+function cachedFriend(overrides = {}) {
+  return {
+    steamId: friend,
+    accountId: 2,
+    name: 'Cached friend',
+    avatarUrl: 'https://example.test/avatar.jpg',
+    status: 'offline',
+    onSteamDeck: false,
+    relationship: 3,
+    ...overrides,
+  };
+}
+
+test('chat cache drops unconfirmed messages and restores loaded history', () => {
+  const cache = chatCache.buildChatCache(self, {
+    friends: { [friend]: cachedFriend() },
+    conversations: {
+      [friend]: cachedConversation({
+        messages: [
+          cachedMessage(),
+          cachedMessage({ id: 'local-pending', ordinal: 0, pending: true, text: 'not yet sent' }),
+        ],
+        unread: 2,
+        preview: { text: 'older', sentAt: 1700000000, mine: false },
+      }),
+    },
+    groups: {},
+    groupProfiles: {},
+  }, 1700000100000);
+
+  assert.equal(cache.version, 1);
+  assert.equal(cache.steamId, self);
+  assert.equal(cache.conversations[friend].messages.length, 1);
+  assert.equal(cache.conversations[friend].messages[0].text, 'older');
+
+  const restored = chatCache.parseChatCache(JSON.parse(JSON.stringify(cache)));
+  assert.ok(restored);
+  assert.equal(restored.friends[0].status, 'offline');
+  assert.equal(restored.conversations[friend].loaded, true);
+  assert.equal(restored.conversations[friend].fromCache, true);
+  assert.equal(restored.conversations[friend].unread, 2);
+  assert.equal(restored.conversations[friend].syncedAt, 1700000000000);
+});
+
+test('chat cache rejects stale versions and malformed documents', () => {
+  assert.equal(chatCache.parseChatCache(null), null);
+  assert.equal(chatCache.parseChatCache({ ...chatCache.buildChatCache(self, {
+    friends: {},
+    conversations: {},
+    groups: {},
+    groupProfiles: {},
+  }), version: 0 }), null);
+  assert.equal(chatCache.parseChatCache({ version: 1, steamId: 'not-a-steam-id' }), null);
+});
+
+test('cached conversations are revalidated only when behind or old', () => {
+  const now = 1700000000000 + 60_000;
+  const fresh = {
+    loaded: true,
+    messages: [cachedMessage()],
+    lastActivity: 1700000000,
+    syncedAt: 1700000000000,
+  };
+
+  assert.equal(chatCache.conversationNeedsSync(fresh, now), false);
+  assert.equal(
+    chatCache.conversationNeedsSync({ ...fresh, lastActivity: 1700000100 }, now),
+    true,
+  );
+  assert.equal(chatCache.conversationNeedsSync({ ...fresh, loaded: false }, now), true);
+  assert.equal(chatCache.conversationNeedsSync({ ...fresh, syncedAt: 0 }, now), true);
+  assert.equal(
+    chatCache.conversationNeedsSync(
+      fresh,
+      1700000000000 + chatCache.CACHE_REFRESH_AFTER_MS + 1,
+    ),
+    true,
+  );
+
+  const room = {
+    loaded: true,
+    messages: [cachedMessage()],
+    lastMessageAt: 1700000000,
+    syncedAt: 1700000000000,
+  };
+
+  assert.equal(chatCache.groupRoomNeedsSync(room, now), false);
+  assert.equal(chatCache.groupRoomNeedsSync({ ...room, lastMessageAt: 1700000100 }, now), true);
+});
+
+test('hydrating cached messages never replaces newer live state', () => {
+  let state = reduce(
+    { ...initialState, selfSteamId: self, friends: { [friend]: cachedFriend({ name: 'Live friend', status: 'online' }) } },
+    {
+      type: 'hydrate',
+      friends: [cachedFriend({ name: 'Cached friend' }), cachedFriend({ steamId: '76561197960265731', name: 'Only cached' })],
+      conversations: {
+        [friend]: cachedConversation({
+          messages: [cachedMessage(), cachedMessage({ id: 'live', text: 'live message', ordinal: 7, sentAt: 1700000020 })],
+        }),
+      },
+    },
+  );
+
+  assert.equal(state.friends[friend].name, 'Live friend');
+  assert.equal(state.friends[friend].status, 'online');
+  assert.equal(state.friends['76561197960265731'].name, 'Only cached');
+  assert.equal(state.conversations[friend].messages.length, 2);
+  assert.equal(state.conversations[friend].messages[1].text, 'live message');
+
+  state = reduce(state, {
+    type: 'sessions',
+    sessions: [{ accountIdFriend: 2, lastMessage: 1700000020, lastView: 0, unreadMessageCount: 1 }],
+  });
+  assert.equal(state.conversations[friend].unread, 1);
+  assert.equal(state.conversations[friend].fromCache, false);
+
+  // A cached unread count is replaced by the server's authoritative count.
+  state = reduce(
+    { ...initialState, selfSteamId: self },
+    { type: 'hydrate', conversations: { [friend]: cachedConversation({ unread: 5 }) }, friends: [] },
+  );
+  assert.equal(state.conversations[friend].unread, 5);
+  state = reduce(state, {
+    type: 'sessions',
+    sessions: [{ accountIdFriend: 2, lastMessage: 1700000000, lastView: 0, unreadMessageCount: 0 }],
+  });
+  assert.equal(state.conversations[friend].unread, 0);
+});
+
+test('group cache hydration merges cached history into a live room', () => {
+  const groupId = '900719925474099';
+  const chatId = '900719925474100';
+  const cachedRoom = {
+    chatId,
+    name: 'General',
+    sortOrder: 0,
+    voiceAllowed: false,
+    messages: [cachedMessage()],
+    loaded: true,
+    loading: false,
+    hasMore: false,
+    oldestTime: 1700000000,
+    oldestOrdinal: 6,
+    lastMessageAt: 1700000000,
+    lastMessage: 'older',
+    lastMessageAccountId: 2,
+    unread: false,
+    syncedAt: 1700000000000,
+  };
+  const cachedGroup = {
+    chatGroupId: groupId,
+    name: 'Cached group',
+    tagline: '',
+    avatarSha: null,
+    avatarUrl: null,
+    memberCount: 2,
+    topMemberIds: [2],
+    defaultChatId: chatId,
+    roomOrder: [chatId],
+    rooms: { [chatId]: cachedRoom },
+    selectedChatId: chatId,
+    userState: null,
+    lastActivity: 1700000000,
+    unread: false,
+  };
+
+  let state = groupStateModule.groupReducer(groupStateModule.initialGroupChatState, {
+    type: 'hydrate',
+    groups: { [groupId]: cachedGroup },
+    profiles: { [friend]: { name: 'Cached author', avatarUrl: null } },
+  });
+
+  assert.equal(state.groupListLoaded, true);
+  assert.equal(state.groups[groupId].rooms[chatId].messages.length, 1);
+  assert.equal(state.groupProfiles[friend].name, 'Cached author');
+
+  state = groupStateModule.groupReducer(state, {
+    type: 'group-message',
+    chatGroupId: groupId,
+    chatId,
+    mine: false,
+    incoming: { chatName: 'Cached group' },
+    message: cachedMessage({ id: 'live-group', text: 'live group', ordinal: 7, sentAt: 1700000020 }),
+  });
+
+  assert.equal(state.groups[groupId].rooms[chatId].messages.length, 2);
+  assert.equal(state.groups[groupId].rooms[chatId].messages[1].text, 'live group');
+  assert.equal(state.groups[groupId].rooms[chatId].loaded, true);
+});
+
+test('storage usage measures friends, chats and groups separately', () => {
+  const groupId = '900719925474099';
+  const chatId = '900719925474100';
+
+  const cache = chatCache.buildChatCache(self, {
+    friends: { [friend]: cachedFriend() },
+    conversations: { [friend]: cachedConversation() },
+    groups: {
+      [groupId]: {
+        chatGroupId: groupId,
+        name: 'Cached group',
+        tagline: '',
+        avatarSha: null,
+        avatarUrl: null,
+        memberCount: 2,
+        topMemberIds: [2],
+        defaultChatId: chatId,
+        roomOrder: [chatId],
+        rooms: {
+          [chatId]: {
+            chatId,
+            name: 'General',
+            sortOrder: 0,
+            voiceAllowed: false,
+            messages: [cachedMessage()],
+            loaded: true,
+            loading: false,
+            hasMore: false,
+            oldestTime: 1700000000,
+            oldestOrdinal: 6,
+            lastMessageAt: 1700000000,
+            lastMessage: 'older',
+            lastMessageAccountId: 2,
+            unread: false,
+            syncedAt: 1700000000000,
+          },
+        },
+        selectedChatId: chatId,
+        userState: null,
+        lastActivity: 1700000000,
+        unread: false,
+      },
+    },
+    groupProfiles: { [friend]: { name: 'Cached author', avatarUrl: null } },
+  }, 1700000100000);
+
+  const usage = chatCacheUsage.measureChatCache(cache);
+
+  assert.equal(usage.friendCount, 1);
+  assert.equal(usage.conversationCount, 1);
+  assert.equal(usage.chatMessageCount, 1);
+  assert.equal(usage.groupCount, 1);
+  assert.equal(usage.groupMessageCount, 1);
+  assert.ok(usage.friendsBytes > 0);
+  assert.ok(usage.chatBytes > 0);
+  assert.ok(usage.groupsBytes > 0);
+  assert.equal(usage.totalBytes, usage.friendsBytes + usage.chatBytes + usage.groupsBytes);
+
+  const combined = chatCacheUsage.combineChatCacheUsage([
+    usage,
+    {
+      friendsBytes: 10,
+      chatBytes: 20,
+      groupsBytes: 30,
+      totalBytes: 60,
+      friendCount: 2,
+      conversationCount: 3,
+      chatMessageCount: 4,
+      groupCount: 5,
+      groupMessageCount: 6,
+    },
+  ]);
+
+  assert.equal(combined.friendsBytes, usage.friendsBytes + 10);
+  assert.equal(combined.chatBytes, usage.chatBytes + 20);
+  assert.equal(combined.groupsBytes, usage.groupsBytes + 30);
+  assert.equal(combined.totalBytes, usage.totalBytes + 60);
+  assert.equal(combined.friendCount, 3);
+  assert.equal(combined.conversationCount, 4);
+  assert.equal(combined.chatMessageCount, 5);
+  assert.equal(combined.groupCount, 6);
+  assert.equal(combined.groupMessageCount, 7);
+
+  assert.deepEqual(chatCacheUsage.combineChatCacheUsage([]), chatCacheUsage.EMPTY_CHAT_CACHE_USAGE);
+});
+
+test('storage sizes are formatted for the settings list', () => {
+  assert.equal(chatCacheUsage.formatChatCacheSize(0), '0 B');
+  assert.equal(chatCacheUsage.formatChatCacheSize(1023), '1023 B');
+  assert.equal(chatCacheUsage.formatChatCacheSize(1024), '1.0 KB');
+  assert.equal(chatCacheUsage.formatChatCacheSize(1536), '1.5 KB');
+  assert.equal(chatCacheUsage.formatChatCacheSize(1024 * 1024), '1.0 MB');
+  assert.equal(chatCacheUsage.formatChatCacheSize(1.5 * 1024 * 1024), '1.5 MB');
+  assert.equal(chatCacheUsage.formatChatCacheSize(-1), '0 B');
 });

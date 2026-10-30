@@ -16,6 +16,13 @@ colors:
   accent-deep: "#216CAD"
   accent-pressed: "#195E96"
   error: "#E2807D"
+  settings-icon-tile: "#3D4049"
+  settings-separator: "#2F323A"
+  settings-field: "#2B2F37"
+  settings-field-border: "#3A3E46"
+  settings-switch-off: "#3B4048"
+  settings-switch-on: "#2C8C86"
+  settings-link: "#3B9EDB"
 typography:
   body:
     fontSize: "15.5px"
@@ -48,6 +55,23 @@ components:
     textColor: "{colors.text}"
     typography: "{typography.body}"
     rounded: "{rounded.control}"
+    height: "48px"
+  settings-row:
+    backgroundColor: "{colors.chrome}"
+    textColor: "{colors.text}"
+    iconBackgroundColor: "{colors.settings-icon-tile}"
+    height: "80px"
+  settings-toggle:
+    backgroundColor: "{colors.chrome}"
+    trackColor: "{colors.settings-switch-off}"
+    selectedTrackColor: "{colors.settings-switch-on}"
+    width: "46px"
+    height: "26px"
+  settings-select:
+    backgroundColor: "{colors.settings-field}"
+    borderColor: "{colors.settings-field-border}"
+    textColor: "{colors.text}"
+    rounded: "6px"
     height: "48px"
 ---
 
@@ -84,6 +108,12 @@ The screen fills available height. The header, composer, attachment row, and emo
 
 The composer is one row: photo action, flexible text field, emoticon action, Send. Controls retain 44-unit widths; the text field takes remaining space and can shrink. Small gaps keep these controls together. Bottom padding respects the device safe area. The optional attachment preview and emoticon tray appear above this row rather than replacing the conversation.
 
+## Settings surfaces
+
+The Settings and Interface screens invert the chat surface relationship: the header uses `canvas`, while the list body uses `chrome`. Rows are 80 units tall with 32-unit icon tiles, full-bleed hairline separators, and a muted chevron. Interface toggles use a 46 × 26 track with a 20-unit thumb; the selected track is settings teal (`#2C8C86`), not the chat action blue. Dropdown fields are 48 units tall with 6-unit corners and a raised `#2B2F37` surface. Links use `#3B9EDB`. Version and supporting copy stay on the muted token so they remain readable on chrome.
+
+These settings pages are an extension of the incumbent Steam-style system, not a second identity. The teal selected state is local to interface toggles; chat actions continue to use the blue accent.
+
 ## Elevation & Depth
 
 The sampled chat components use flat tonal layering and hairline separators, not drop shadows. Raised inputs and deeper chrome make adjoining regions distinguishable without decorative elevation. Pressed state changes tone or opacity.
@@ -113,4 +143,4 @@ Controls, image previews, and the emoticon search field use small rounded corner
 - **Don't** replace symbol controls with decorative emoji or text glyphs.
 - **Don't** treat synthetic web-preview content as product or native-device evidence.
 
-Recorded from the theme and chat components on 2026-10-27. The supplied 320- and 390-pixel captures are React Native Web previews with synthetic content. Native device capture and live Steam upload verification were unavailable; no device-specific visual certification is implied.
+Recorded from the theme and chat components on 2026-10-27. Settings surfaces added 2026-10-29 from the supplied Settings and Interface mockups. The supplied 320- and 390-pixel captures are React Native Web previews with synthetic content. Native device capture and live Steam upload verification were unavailable; no device-specific visual certification is implied.

@@ -20,6 +20,7 @@ import {
 } from '@/lib/steam/cm-client';
 import {
   FRIEND_RELATIONSHIP_FRIEND,
+  type ChatRoomHistoryMessage,
   type ChatRoomSummaryPair,
   type CmFriend,
   type CmPersona,
@@ -41,6 +42,17 @@ import type { SteamEmoticon } from '@/lib/steam/chat-media';
 import { bytesToHex } from '@/lib/steam/bytes';
 import type { ChatImage } from '@/lib/steam/image-picker';
 import { uploadChatImage, uploadChatRoomImage } from '@/lib/steam/image-upload';
+import {
+  buildChatCache,
+  conversationNeedsSync,
+  groupRoomNeedsSync,
+  type ChatCacheSnapshot,
+} from '@/lib/steam/chat-cache';
+import {
+  clearChatCaches,
+  readChatCache,
+  writeChatCache,
+} from '@/lib/steam/chat-cache-storage';
 import {
   groupDisplayName,
   groupReducer,
@@ -65,6 +77,134 @@ const PERSONA_FALLBACK_DELAY_MS = 2_500;
 const TYPING_SEND_INTERVAL_MS = 10_000;
 /** Matches the app: a friend stops "typing" after 11s without a new notice. */
 const TYPING_CLEAR_MS = 11_000;
+/** A caught-up cache needs at most a couple of pages of new messages. */
+const MAX_SYNC_PAGES = 3;
+
+function newestConversationMessage(messages: ChatMessage[]): ChatMessage | undefined {
+  return messages[messages.length - 1];
+}
+
+function newestIncomingMessage(messages: RecentMessage[]): RecentMessage | undefined {
+  let newest: RecentMessage | undefined;
+
+  for (const message of messages) {
+    if (
+      !newest ||
+      message.timestamp > newest.timestamp ||
+      (message.timestamp === newest.timestamp && message.ordinal > newest.ordinal)
+    ) {
+      newest = message;
+    }
+  }
+
+  return newest;
+}
+
+function newestGroupMessage(messages: ChatRoomHistoryMessage[]): ChatRoomHistoryMessage | undefined {
+  let newest: ChatRoomHistoryMessage | undefined;
+
+  for (const message of messages) {
+    if (
+      !newest ||
+      message.timestamp > newest.timestamp ||
+      (message.timestamp === newest.timestamp && message.ordinal > newest.ordinal)
+    ) {
+      newest = message;
+    }
+  }
+
+  return newest;
+}
+
+/**
+ * Fetch only the messages newer than the newest cached one, matching the
+ * official client's `GetMessagesFromTimeRange` behavior. This preserves the
+ * older cached history and leaves no gap when a chat was active on desktop.
+ */
+async function fetchNewerConversationMessages(
+  client: SteamCmClient,
+  steamId: string,
+  boundary: ChatMessage,
+  isCurrent: () => boolean,
+): Promise<RecentMessage[]> {
+  const collected: RecentMessage[] = [];
+  let time = boundary.sentAt;
+  let ordinal = boundary.ordinal;
+
+  for (let page = 0; page < MAX_SYNC_PAGES; page += 1) {
+    const response = await client.getRecentMessages(steamId, {
+      count: INITIAL_MESSAGE_COUNT,
+      startTime: time,
+      startOrdinal: ordinal,
+    });
+
+    if (!isCurrent()) {
+      return collected;
+    }
+
+    collected.push(...response.messages);
+
+    if (!response.moreAvailable || response.messages.length === 0) {
+      break;
+    }
+
+    const newest = newestIncomingMessage(response.messages);
+
+    if (!newest || newest.timestamp < time || (newest.timestamp === time && newest.ordinal <= ordinal)) {
+      break;
+    }
+
+    time = newest.timestamp;
+    ordinal = newest.ordinal;
+  }
+
+  return collected;
+}
+
+async function fetchNewerGroupMessages(
+  client: SteamCmClient,
+  chatGroupId: string,
+  chatId: string,
+  boundary: ChatMessage,
+  isCurrent: () => boolean,
+): Promise<ChatRoomHistoryMessage[]> {
+  const collected: ChatRoomHistoryMessage[] = [];
+  let time = boundary.sentAt;
+  let ordinal = boundary.ordinal;
+
+  for (let page = 0; page < MAX_SYNC_PAGES; page += 1) {
+    const response = await client.getChatRoomHistory({
+      chatGroupId,
+      chatId,
+      startTime: time,
+      startOrdinal: ordinal,
+      lastTime: GROUP_HISTORY_INFINITE,
+      lastOrdinal: 0,
+      maxCount: INITIAL_GROUP_MESSAGE_COUNT,
+    });
+
+    if (!isCurrent()) {
+      return collected;
+    }
+
+    collected.push(...response.messages);
+
+    if (!response.moreAvailable || response.messages.length === 0) {
+      break;
+    }
+
+    const newest = newestGroupMessage(response.messages);
+
+    if (!newest || newest.timestamp < time || (newest.timestamp === time && newest.ordinal <= ordinal)) {
+      break;
+    }
+
+    time = newest.timestamp;
+    ordinal = newest.ordinal;
+  }
+
+  return collected;
+}
 
 /** Shown until the server sends a persona name for a friend. */
 export const UNKNOWN_FRIEND_NAME = 'Steam user';
@@ -113,6 +253,10 @@ export type Conversation = {
   unread: number;
   preview?: ChatPreview;
   error?: string;
+  /** Unix milliseconds when this page was last reconciled with Steam. */
+  syncedAt: number;
+  /** True while the conversation is only backed by disk cache. */
+  fromCache?: boolean;
 };
 
 export type ChatListItem = {
@@ -145,6 +289,11 @@ type SteamChatState = {
 
 type Action =
   | { type: 'reset' }
+  | {
+      type: 'hydrate';
+      friends: SteamFriend[];
+      conversations: Record<string, Conversation>;
+    }
   | { type: 'connection'; state: SteamCmConnectionState }
   | { type: 'logged-on' }
   | { type: 'auth-error'; eresult: number }
@@ -164,6 +313,7 @@ type Action =
       steamId: string;
       messages: RecentMessage[];
       moreAvailable: boolean;
+      direction?: 'initial' | 'older' | 'newer';
     }
   | { type: 'load-error'; steamId: string; error: string }
   | { type: 'send-pending'; steamId: string; message: ChatMessage }
@@ -206,6 +356,7 @@ function emptyConversation(steamId: string): Conversation {
     oldestOrdinal: 0,
     lastActivity: 0,
     unread: 0,
+    syncedAt: 0,
   };
 }
 
@@ -299,10 +450,120 @@ function mergeHistory(
   return sortMessages([...byKey.values()]);
 }
 
+/**
+ * Restore a conversation from disk without discarding anything the live CM
+ * has already delivered. Live messages and presence always win over cache.
+ */
+function mergeCachedConversation(
+  existing: Conversation | undefined,
+  cached: Conversation,
+): Conversation {
+  if (!existing) {
+    return { ...cached, fromCache: true };
+  }
+
+  const byKey = new Map<string, ChatMessage>();
+
+  for (const message of cached.messages) {
+    byKey.set(messageKey(message), message);
+  }
+
+  for (const message of existing.messages) {
+    byKey.set(messageKey(message), message);
+  }
+
+  const messages = sortMessages([...byKey.values()]);
+  const oldest = messages[0];
+  const newest = messages[messages.length - 1];
+  const preview =
+    existing.preview && cached.preview
+      ? existing.preview.sentAt >= cached.preview.sentAt
+        ? existing.preview
+        : cached.preview
+      : (existing.preview ?? cached.preview);
+
+  return {
+    ...existing,
+    messages,
+    loaded: existing.loaded || cached.loaded,
+    hasMore: existing.loaded ? existing.hasMore : cached.hasMore,
+    oldestTime: oldest?.sentAt ?? 0,
+    oldestOrdinal: oldest?.ordinal ?? 0,
+    lastActivity: Math.max(existing.lastActivity, cached.lastActivity, newest?.sentAt ?? 0),
+    preview,
+    syncedAt: existing.loaded ? existing.syncedAt : cached.syncedAt,
+    fromCache: false,
+  };
+}
+
+function resolveHasMoreAfterLoad(
+  conversation: Conversation,
+  direction: 'initial' | 'older' | 'newer' | undefined,
+  incoming: RecentMessage[],
+  moreAvailable: boolean,
+): boolean {
+  if (direction === 'newer') {
+    return conversation.hasMore;
+  }
+
+  if (direction === 'older' || !conversation.loaded || conversation.messages.length === 0) {
+    return moreAvailable;
+  }
+
+  // An initial refresh returns the newest page. If our cache already has
+  // messages older than that page, `more_available` describes a window we
+  // already covered, so keep the cached flag instead of enabling a load that
+  // can only return duplicates.
+  const incomingOldest = incoming.reduce(
+    (oldest, message) => (message.timestamp > 0 && message.timestamp < oldest ? message.timestamp : oldest),
+    Number.POSITIVE_INFINITY,
+  );
+
+  if (Number.isFinite(incomingOldest) && conversation.oldestTime > 0 && incomingOldest > conversation.oldestTime) {
+    return conversation.hasMore;
+  }
+
+  return moreAvailable;
+}
+
 function reduce(state: SteamChatState, action: Action): SteamChatState {
   switch (action.type) {
     case 'reset':
       return initialState;
+
+    case 'hydrate': {
+      const friends = { ...state.friends };
+
+      for (const friend of action.friends) {
+        const existing = friends[friend.steamId];
+
+        if (!existing) {
+          friends[friend.steamId] = friend;
+          continue;
+        }
+
+        // A persona update can arrive before the cached list. Fill in the
+        // missing identity without replacing live presence.
+        if (existing.name === UNKNOWN_FRIEND_NAME) {
+          friends[friend.steamId] = {
+            ...friend,
+            status: existing.status,
+            gameAppId: existing.gameAppId,
+            gameName: existing.gameName,
+            lastOnline: existing.lastOnline ?? friend.lastOnline,
+            onSteamDeck: existing.onSteamDeck,
+          };
+        }
+      }
+
+      const conversations = { ...state.conversations };
+
+      for (const [steamId, cached] of Object.entries(action.conversations)) {
+        conversations[steamId] = mergeCachedConversation(conversations[steamId], cached);
+      }
+
+      return { ...state, friends, conversations };
+    }
 
     case 'connection':
       return {
@@ -523,6 +784,7 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
             unread:
               !mine && state.active !== steamId ? conversation.unread + 1 : conversation.unread,
             preview: lastMessagePreview(messages) ?? conversation.preview,
+            fromCache: false,
           },
         },
       };
@@ -549,10 +811,17 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
         conversations[steamId] = {
           ...conversation,
           lastActivity: Math.max(conversation.lastActivity, session.lastMessage),
+          // Sessions carry the server's authoritative unread count. A cached
+          // count can be days old (or already read on desktop), so replace it
+          // instead of keeping the higher of the two. Live arrivals that race
+          // this response are still merged below by the message reducer.
           unread:
             state.active === steamId
               ? 0
-              : Math.max(conversation.unread, session.unreadMessageCount),
+              : conversation.fromCache
+                ? session.unreadMessageCount
+                : Math.max(conversation.unread, session.unreadMessageCount),
+          fromCache: false,
         };
       }
 
@@ -579,6 +848,7 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
             ...conversation,
             preview: action.preview,
             lastActivity: Math.max(conversation.lastActivity, action.preview.sentAt),
+            fromCache: false,
           },
         },
       };
@@ -611,7 +881,7 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
         ...state,
         conversations: {
           ...state.conversations,
-          [action.steamId]: { ...conversation, unread: 0 },
+          [action.steamId]: { ...conversation, unread: 0, fromCache: false },
         },
       };
     }
@@ -643,12 +913,19 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
             messages,
             loaded: true,
             loading: false,
-            hasMore: action.moreAvailable,
+            hasMore: resolveHasMoreAfterLoad(
+              conversation,
+              action.direction,
+              action.messages,
+              action.moreAvailable,
+            ),
             oldestTime: oldest?.sentAt ?? 0,
             oldestOrdinal: oldest?.ordinal ?? 0,
             lastActivity: Math.max(conversation.lastActivity, newest?.sentAt ?? 0),
             preview: lastMessagePreview(messages) ?? conversation.preview,
             error: undefined,
+            syncedAt: Date.now(),
+            fromCache: false,
           },
         },
       };
@@ -679,6 +956,7 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
             messages,
             lastActivity: Math.max(conversation.lastActivity, action.message.sentAt),
             preview: lastMessagePreview(messages) ?? conversation.preview,
+            fromCache: false,
           },
         },
       };
@@ -713,6 +991,7 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
             ...conversation,
             messages,
             preview: lastMessagePreview(messages) ?? conversation.preview,
+            fromCache: false,
           },
         },
       };
@@ -789,15 +1068,19 @@ type SteamChatContextValue = SteamChatState &
     markGroupRead: (chatGroupId: string, chatId: string, timestamp: number) => void;
     sendGroupMessage: (chatGroupId: string, chatId: string, text: string) => Promise<void>;
     sendGroupImage: (chatGroupId: string, chatId: string, image: ChatImage) => Promise<void>;
+    /** Deletes every saved account's on-disk chat cache. */
+    clearCache: () => Promise<void>;
   };
 
 const SteamChatContext = createContext<SteamChatContextValue | null>(null);
 
 export function SteamChatProvider({ children }: { children: ReactNode }) {
-  const { status, credentials, authRevision, getWebAccessToken, updateAccountProfile } =
+  const { status, credentials, authRevision, accounts, getWebAccessToken, updateAccountProfile } =
     useSession();
   const [state, dispatch] = useReducer(reduce, initialState);
   const [groupState, groupDispatch] = useReducer(groupReducer, initialGroupChatState);
+  const [cacheGeneration, setCacheGeneration] = useState(0);
+  const currentSteamId = credentials?.steamId ?? null;
 
   const credentialsRef = useRef(credentials);
   const stateRef = useRef(state);
@@ -811,10 +1094,24 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
   const personaFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typingTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const typingSentAt = useRef(new Map<string, number>());
+  /** Account whose disk cache is trusted for the current state. */
+  const cacheAccountRef = useRef<string | null>(null);
+  const cacheReadyRef = useRef(false);
+  const cacheSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accountsRef = useRef(accounts);
 
   useEffect(() => {
     credentialsRef.current = credentials;
   }, [credentials]);
+
+  /**
+   * Read inside the cache effect without re-running it whenever an account
+   * profile changes. The list tells us whether a previous account was
+   * switched away from (still saved) or signed out (removed).
+   */
+  useEffect(() => {
+    accountsRef.current = accounts;
+  }, [accounts]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -824,6 +1121,158 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
     groupStateRef.current = groupState;
     groupProfilesRef.current = groupState.groupProfiles;
   }, [groupState]);
+
+  /** Persist the cacheable slices of the current account. */
+  const writeCacheSnapshot = useCallback((account: string) => {
+    const snapshot: ChatCacheSnapshot = {
+      friends: stateRef.current.friends,
+      conversations: stateRef.current.conversations,
+      groups: groupStateRef.current.groups,
+      groupProfiles: groupStateRef.current.groupProfiles,
+    };
+
+    if (
+      Object.keys(snapshot.friends).length === 0 &&
+      Object.keys(snapshot.conversations).length === 0 &&
+      Object.keys(snapshot.groups).length === 0
+    ) {
+      return;
+    }
+
+    void writeChatCache(account, buildChatCache(account, snapshot));
+  }, []);
+
+  // Load the disk cache as soon as the account is known. The CM connection
+  // runs independently, so the lists and opened chats can paint from disk
+  // while Steam is still logging on (or offline).
+  useEffect(() => {
+    const previousAccount = cacheAccountRef.current;
+
+    if (previousAccount && previousAccount !== currentSteamId && cacheReadyRef.current) {
+      // Switching between saved accounts keeps each account's cache. A signed
+      // out account is no longer in the list; its tokens are gone, so its
+      // local history should go with them.
+      if (accountsRef.current.some((account) => account.steamId === previousAccount)) {
+        writeCacheSnapshot(previousAccount);
+      } else {
+        void clearChatCaches([previousAccount]);
+      }
+    }
+
+    cacheAccountRef.current = null;
+    cacheReadyRef.current = false;
+
+    if (status !== 'signed-in' || !currentSteamId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void readChatCache(currentSteamId)
+      .then((cache) => {
+        if (cancelled || !cache) {
+          return;
+        }
+
+        dispatch({
+          type: 'hydrate',
+          friends: cache.friends,
+          conversations: cache.conversations,
+        });
+        groupDispatch({
+          type: 'hydrate',
+          groups: cache.groups,
+          profiles: cache.groupProfiles,
+        });
+      })
+      .catch(() => {
+        // A cache failure only means the normal Steam load is used.
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+
+        cacheAccountRef.current = currentSteamId;
+        cacheReadyRef.current = true;
+        setCacheGeneration((current) => current + 1);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSteamId, status, authRevision, writeCacheSnapshot]);
+
+  // Debounced writes keep presence and typing from causing a disk write on
+  // every CM event. The snapshot is always taken at write time.
+  useEffect(() => {
+    if (status !== 'signed-in' || !currentSteamId || !cacheReadyRef.current) {
+      return;
+    }
+
+    if (cacheSaveTimer.current) {
+      clearTimeout(cacheSaveTimer.current);
+    }
+
+    cacheSaveTimer.current = setTimeout(() => {
+      cacheSaveTimer.current = null;
+
+      if (cacheReadyRef.current && cacheAccountRef.current) {
+        writeCacheSnapshot(cacheAccountRef.current);
+      }
+    }, 1_500);
+
+    return () => {
+      if (cacheSaveTimer.current) {
+        clearTimeout(cacheSaveTimer.current);
+        cacheSaveTimer.current = null;
+      }
+    };
+  }, [
+    cacheGeneration,
+    currentSteamId,
+    state.friends,
+    state.conversations,
+    groupState.groups,
+    groupState.groupProfiles,
+    status,
+    writeCacheSnapshot,
+  ]);
+
+  // Flush the newest state when the app is backgrounded instead of waiting
+  // for the debounce.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next !== 'active' && cacheReadyRef.current && cacheAccountRef.current) {
+        writeCacheSnapshot(cacheAccountRef.current);
+      }
+    });
+
+    return () => subscription.remove();
+  }, [writeCacheSnapshot]);
+
+  // Signing out removes the active account, so its cache is dropped by the
+  // hydration effect above (the account is no longer in the saved list).
+
+  /**
+   * Storage screen action. Cancel the pending debounce first so a snapshot
+   * cannot recreate the file right after it is deleted, then remove every
+   * saved account's cache.
+   */
+  const clearCache = useCallback(async () => {
+    if (cacheSaveTimer.current) {
+      clearTimeout(cacheSaveTimer.current);
+      cacheSaveTimer.current = null;
+    }
+
+    const steamIds = new Set(accountsRef.current.map((account) => account.steamId));
+
+    if (cacheAccountRef.current) {
+      steamIds.add(cacheAccountRef.current);
+    }
+
+    await clearChatCaches([...steamIds]);
+  }, []);
 
   /**
    * The CM pushes persona state right after the friends list, but a friend can
@@ -868,14 +1317,43 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (!force && (conversation?.loading || conversation?.loaded)) {
+    if (conversation?.loading) {
       return;
     }
 
+    // Cached history is shown immediately. Only ask Steam for more when the
+    // page is missing, known to be behind, or old enough to be revalidated.
+    if (!force && conversation?.loaded && !conversationNeedsSync(conversation)) {
+      return;
+    }
+
+    const boundary =
+      conversation?.loaded && conversation.messages.length > 0
+        ? newestConversationMessage(conversation.messages)
+        : undefined;
+
     dispatch({ type: 'loading', steamId });
 
-    void client
-      .getRecentMessages(steamId, { count: INITIAL_MESSAGE_COUNT })
+    const pending = boundary
+      ? fetchNewerConversationMessages(
+          client,
+          steamId,
+          boundary,
+          () => clientTokenRef.current === clientToken && client.isLoggedOn,
+        ).then((messages) => ({
+          messages,
+          moreAvailable: false,
+          direction: 'newer' as const,
+        }))
+      : client
+          .getRecentMessages(steamId, { count: INITIAL_MESSAGE_COUNT })
+          .then((response) => ({
+            messages: response.messages,
+            moreAvailable: response.moreAvailable,
+            direction: 'initial' as const,
+          }));
+
+    void pending
       .then((response) => {
         if (clientTokenRef.current !== clientToken) {
           return;
@@ -886,6 +1364,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
           steamId,
           messages: response.messages,
           moreAvailable: response.moreAvailable,
+          direction: response.direction,
         });
       })
       .catch((error: unknown) => {
@@ -931,6 +1410,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
           steamId,
           messages: response.messages,
           moreAvailable: response.moreAvailable,
+          direction: 'older',
         });
       })
       .catch((error: unknown) => {
@@ -1148,22 +1628,52 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (!force && (room?.loading || room?.loaded)) {
+    if (room?.loading) {
       return;
     }
 
+    // Cached room history is rendered immediately. Revalidate it only when
+    // the room is missing, behind the group summary, or old enough.
+    if (!force && room?.loaded && !groupRoomNeedsSync(room)) {
+      return;
+    }
+
+    const boundary =
+      room?.loaded && room.messages.length > 0
+        ? newestConversationMessage(room.messages)
+        : undefined;
+
     groupDispatch({ type: 'group-history-loading', chatGroupId, chatId });
 
-    void client
-      .getChatRoomHistory({
-        chatGroupId,
-        chatId,
-        lastTime: GROUP_HISTORY_INFINITE,
-        lastOrdinal: 0,
-        startTime: 0,
-        startOrdinal: 0,
-        maxCount: INITIAL_GROUP_MESSAGE_COUNT,
-      })
+    const pending = boundary
+      ? fetchNewerGroupMessages(
+          client,
+          chatGroupId,
+          chatId,
+          boundary,
+          () => clientTokenRef.current === clientToken && client.isLoggedOn,
+        ).then((messages) => ({
+          messages,
+          moreAvailable: false,
+          direction: 'newer' as const,
+        }))
+      : client
+          .getChatRoomHistory({
+            chatGroupId,
+            chatId,
+            lastTime: GROUP_HISTORY_INFINITE,
+            lastOrdinal: 0,
+            startTime: 0,
+            startOrdinal: 0,
+            maxCount: INITIAL_GROUP_MESSAGE_COUNT,
+          })
+          .then((response) => ({
+            messages: response.messages,
+            moreAvailable: response.moreAvailable,
+            direction: 'initial' as const,
+          }));
+
+    void pending
       .then((response) => {
         if (clientTokenRef.current !== clientToken) {
           return;
@@ -1175,6 +1685,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
           chatId,
           messages: response.messages,
           moreAvailable: response.moreAvailable,
+          direction: response.direction,
           selfSteamId: stateRef.current.selfSteamId,
         });
         requestGroupProfiles(
@@ -1230,6 +1741,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
           chatId,
           messages: response.messages,
           moreAvailable: response.moreAvailable,
+          direction: 'older',
           selfSteamId: stateRef.current.selfSteamId,
         });
         requestGroupProfiles(
@@ -1556,6 +2068,17 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
           if (stateRef.current.active) {
             loadConversation(stateRef.current.active, true);
           }
+          {
+            const activeGroupId = groupStateRef.current.activeGroup;
+            const activeGroup = activeGroupId
+              ? groupStateRef.current.groups[activeGroupId]
+              : undefined;
+            const activeChatId = activeGroup?.selectedChatId;
+
+            if (activeGroupId && activeChatId) {
+              loadGroupHistory(activeGroupId, activeChatId);
+            }
+          }
           break;
         case 'auth-error':
           dispatch({ type: 'auth-error', eresult: event.eresult });
@@ -1714,6 +2237,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       activateGroups,
       applyGroups,
       loadConversation,
+      loadGroupHistory,
       loadPreviews,
       refreshGroups,
       requestGroupProfiles,
@@ -1909,6 +2433,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       markGroupRead,
       sendGroupMessage,
       sendGroupImage,
+      clearCache,
     }),
     [
       state,
@@ -1934,6 +2459,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       markGroupRead,
       sendGroupMessage,
       sendGroupImage,
+      clearCache,
     ],
   );
 

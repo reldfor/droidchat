@@ -35,6 +35,8 @@ export type GroupRoom = {
   lastMessageAccountId: number;
   unread: boolean;
   error?: string;
+  /** Unix milliseconds when this room was last reconciled with Steam. */
+  syncedAt: number;
 };
 
 export type GroupChat = {
@@ -69,6 +71,11 @@ export type GroupChatSlice = {
 
 export type GroupAction =
   | { type: 'reset' }
+  | {
+      type: 'hydrate';
+      groups: Record<string, GroupChat>;
+      profiles: Record<string, GroupAuthorProfile>;
+    }
   | { type: 'groups'; groups: ChatRoomSummaryPair[] }
   | { type: 'groups-error'; error: string }
   | { type: 'group-states'; states: ChatRoomGroupState[] }
@@ -86,6 +93,7 @@ export type GroupAction =
       messages: ChatRoomHistoryMessage[];
       moreAvailable: boolean;
       selfSteamId: string | null;
+      direction?: 'initial' | 'older' | 'newer';
     }
   | { type: 'group-history-error'; chatGroupId: string; chatId: string; error: string }
   | {
@@ -135,6 +143,7 @@ function emptyRoom(chatId: string): GroupRoom {
     lastMessage: '',
     lastMessageAccountId: 0,
     unread: false,
+    syncedAt: 0,
   };
 }
 
@@ -527,10 +536,150 @@ function ensureRoom(group: GroupChat, chatId: string): GroupRoom {
   return group.rooms[chatId] ?? emptyRoom(chatId);
 }
 
+function resolveRoomHasMore(
+  room: GroupRoom,
+  direction: 'initial' | 'older' | 'newer' | undefined,
+  incoming: ChatRoomHistoryMessage[],
+  moreAvailable: boolean,
+): boolean {
+  if (direction === 'newer') {
+    return room.hasMore;
+  }
+
+  if (direction === 'older' || !room.loaded || room.messages.length === 0) {
+    return moreAvailable;
+  }
+
+  const incomingOldest = incoming.reduce(
+    (oldest, message) =>
+      message.timestamp > 0 && message.timestamp < oldest ? message.timestamp : oldest,
+    Number.POSITIVE_INFINITY,
+  );
+
+  if (Number.isFinite(incomingOldest) && room.oldestTime > 0 && incomingOldest > room.oldestTime) {
+    return room.hasMore;
+  }
+
+  return moreAvailable;
+}
+
+function mergeCachedRoom(existing: GroupRoom | undefined, cached: GroupRoom): GroupRoom {
+  if (!existing) {
+    return cached;
+  }
+
+  const byKey = new Map<string, ChatMessage>();
+
+  for (const message of cached.messages) {
+    byKey.set(messageKey(message), message);
+  }
+
+  for (const message of existing.messages) {
+    byKey.set(messageKey(message), message);
+  }
+
+  const messages = sortMessages([...byKey.values()]);
+  const oldest = messages[0];
+  const newest = messages[messages.length - 1];
+
+  return {
+    ...cached,
+    ...existing,
+    chatId: existing.chatId,
+    name: existing.name || cached.name,
+    messages,
+    loaded: existing.loaded || cached.loaded,
+    loading: existing.loading,
+    hasMore: existing.loaded ? existing.hasMore : cached.hasMore,
+    oldestTime: oldest?.sentAt ?? 0,
+    oldestOrdinal: oldest?.ordinal ?? 0,
+    lastMessageAt: Math.max(existing.lastMessageAt, cached.lastMessageAt, newest?.sentAt ?? 0),
+    lastMessage: existing.lastMessage || cached.lastMessage,
+    lastMessageAccountId: existing.lastMessageAccountId || cached.lastMessageAccountId,
+    unread: existing.unread,
+    syncedAt: Math.max(existing.syncedAt, cached.syncedAt),
+  };
+}
+
+function mergeCachedGroup(existing: GroupChat | undefined, cached: GroupChat): GroupChat {
+  if (!existing) {
+    return cached;
+  }
+
+  const rooms: Record<string, GroupRoom> = { ...existing.rooms };
+
+  for (const [chatId, cachedRoom] of Object.entries(cached.rooms)) {
+    rooms[chatId] = mergeCachedRoom(rooms[chatId], cachedRoom);
+  }
+
+  const roomOrder = [...existing.roomOrder];
+
+  for (const chatId of cached.roomOrder) {
+    if (rooms[chatId] && !roomOrder.includes(chatId)) {
+      roomOrder.push(chatId);
+    }
+  }
+
+  for (const chatId of Object.keys(rooms)) {
+    if (!roomOrder.includes(chatId)) {
+      roomOrder.push(chatId);
+    }
+  }
+
+  const defaultChatId = rooms[existing.defaultChatId]
+    ? existing.defaultChatId
+    : cached.defaultChatId;
+  const selectedChatId = rooms[existing.selectedChatId]
+    ? existing.selectedChatId
+    : cached.selectedChatId;
+
+  return {
+    ...cached,
+    ...existing,
+    name: existing.name || cached.name,
+    tagline: existing.tagline || cached.tagline,
+    avatarSha: existing.avatarSha ?? cached.avatarSha,
+    avatarUrl: existing.avatarUrl ?? cached.avatarUrl,
+    memberCount: existing.memberCount || cached.memberCount,
+    topMemberIds: existing.topMemberIds.length > 0 ? existing.topMemberIds : cached.topMemberIds,
+    defaultChatId,
+    roomOrder,
+    rooms,
+    selectedChatId: rooms[selectedChatId] ? selectedChatId : (roomOrder[0] ?? ''),
+    userState: existing.userState ?? cached.userState,
+    lastActivity: Math.max(
+      existing.lastActivity,
+      cached.lastActivity,
+      ...Object.values(rooms).map((room) => room.lastMessageAt),
+      0,
+    ),
+    unread: existing.unread,
+  };
+}
+
 export function groupReducer(state: GroupChatSlice, action: GroupAction): GroupChatSlice {
   switch (action.type) {
     case 'reset':
       return initialGroupChatState;
+
+    case 'hydrate': {
+      if (Object.keys(action.groups).length === 0 && Object.keys(action.profiles).length === 0) {
+        return state;
+      }
+
+      const groups = { ...state.groups };
+
+      for (const [chatGroupId, cached] of Object.entries(action.groups)) {
+        groups[chatGroupId] = mergeCachedGroup(groups[chatGroupId], cached);
+      }
+
+      return {
+        ...state,
+        groups,
+        groupProfiles: { ...action.profiles, ...state.groupProfiles },
+        groupListLoaded: state.groupListLoaded || Object.keys(action.groups).length > 0,
+      };
+    }
 
     case 'groups': {
       const groups: Record<string, GroupChat> = {};
@@ -745,7 +894,12 @@ export function groupReducer(state: GroupChatSlice, action: GroupAction): GroupC
               messages,
               loaded: true,
               loading: false,
-              hasMore: action.moreAvailable,
+              hasMore: resolveRoomHasMore(
+                room,
+                action.direction,
+                action.messages,
+                action.moreAvailable,
+              ),
               oldestTime: oldest?.sentAt ?? 0,
               oldestOrdinal: oldest?.ordinal ?? 0,
               lastMessageAt: Math.max(room.lastMessageAt, newestAt),
@@ -756,6 +910,7 @@ export function groupReducer(state: GroupChatSlice, action: GroupAction): GroupC
                 ? accountIdFromSteamId(newest.authorSteamId)
                 : room.lastMessageAccountId,
               error: undefined,
+              syncedAt: Date.now(),
             },
           },
         };

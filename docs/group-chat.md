@@ -49,6 +49,66 @@ The supplied APK (`com.valvesoftware.android.steam.friendsui` 1.1, build
 `chat_group_id`, `chat_id`, and `spoiler`, while friend chats append
 `friend_steamid` and `spoiler`.
 
+## Implementation map
+
+The alternative frontend already implements the same model:
+
+- `src/lib/steam/cm-proto.ts` encodes and decodes the group requests and
+  notifications, including summary pairs, room history, sends, acknowledgements,
+  room changes, deleted messages, and player link details.
+- `src/context/steam-chat.tsx` loads joined groups, activates the group set,
+  pages room history, sends and acknowledges messages, keeps per-room read
+  state, and resolves non-friend authors in batches.
+- `src/context/group-chat-state.ts` stores groups, rooms, messages, previews, and
+  per-room unread state.
+- `src/app/(app)/groups.tsx` and `src/app/group/[id].tsx` provide the existing
+  group list and room UI. The Settings work does not add another group page.
+- `MessageBubble` now honors the Interface settings that suppress inline images
+  and emoticons, including the Wi-Fi-only media rule. Those settings apply to
+  direct and group messages through the shared bubble.
+
+## APK evidence
+
+REA/JADX inspected the supplied package as
+`com.valvesoftware.android.steam.friendsui` 1.1 (build 10167321), SHA-256
+`e5425fa146c254c59856b8a64c129fdb95fcf8249c4958b9ec73fedf0d0d4d5c`
+(package Evidence `ev_a33adf72fa1b3089978928b353ff47cb454612245b46afe194aa0305071b2d14`).
+A class search for `ChatRoom` returned no Android classes
+(`ev_08ffdd6aedf54a129b62697cd770644f37ca69372c7190396eb1c8c78797b70c`),
+which is expected: the chat implementation is in the bundled Hermes bytecode,
+not in Java/Kotlin. The service descriptors and message fields used above were
+extracted from that bundle into `.analysis/chatroom-schema.txt` and
+`.analysis/chatroom-messages.txt`, then checked against the Steam protobuf
+schemas. This is static evidence of the shipped contract, not a runtime capture
+of a signed-in group session.
+
+The exact wire fields used by this client are:
+
+- `ChatRoom.GetMyChatRoomGroups#1` (empty request) → repeated
+  `CChatRoomSummaryPair` with `group_summary` and `user_chat_group_state`.
+- `ChatRoom.SetSessionActiveChatRoomGroups#1` → `chat_group_ids`,
+  `chat_groups_data_requested`, and an optional member-virtualization threshold.
+- `ChatRoom.GetMessageHistory#1` → `chat_group_id`, `chat_id`, `last_time`,
+  `last_ordinal`, `start_time`, `start_ordinal`, `max_count`; the response
+  carries messages, deletions, reactions, and `more_available`.
+- `ChatRoom.SendChatMessage#1` → `chat_group_id`, `chat_id`, `message`,
+  `echo_to_sender`; the response carries the modified message, timestamp,
+  ordinal, and BBCode-free text.
+- `ChatRoom.AckChatMessage#1` → `chat_group_id`, `chat_id`, `timestamp`.
+- `ChatRoomClient.NotifyIncomingChatMessage#1` →
+  `chat_group_id`, `chat_id`, `steamid_sender`, `message`, `timestamp`,
+  `ordinal`, `chat_name`, `notification_key`.
+- `ChatRoomClient.NotifyAckChatMessageEcho#1`,
+  `NotifyChatGroupUserStateChanged#1`,
+  `NotifyChatRoomHeaderStateChange#1`,
+  `NotifyChatRoomGroupRoomsChange#1`, `NotifyChatMessageModified#1`, and
+  `NotifyChatRoomDisconnect#1` keep the open group set synchronized.
+
+Live group messages only flow for groups in the active session set. That is why
+the client replays `SetSessionActiveChatRoomGroups` after a reconnect or a
+`NotifyChatRoomDisconnect` resync, and why the room list is loaded separately
+from the per-room history.
+
 ## Verification
 
 `npm test`, `npx tsc --noEmit`, `npx expo lint`, and a web export cover the
