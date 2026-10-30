@@ -158,6 +158,48 @@ export function describeFriendStatus(friend: {
   return friend.status === 'away' ? 'Away' : 'Online';
 }
 
+/**
+ * The short presence line Steam shows under an in-game friend's name.
+ *
+ * Games usually publish a `status` value (`Online`, `In lobby`, ...). When
+ * only the localized `steam_display` token is available, turn a key such as
+ * `#Status_Online` into readable text. Steam's game-specific localization
+ * table is not part of the CM payload, so this is a best-effort fallback.
+ */
+function humanizePresenceToken(value: string): string | undefined {
+  const parts = value.replace(/^#/, '').split('_');
+
+  while (parts.length > 1 && /^(status|rp|steam|display)$/i.test(parts[0])) {
+    parts.shift();
+  }
+
+  const text = parts
+    .filter(Boolean)
+    .map((part) => part.replace(/([a-z0-9])([A-Z])/g, '$1 $2'))
+    .join(' ')
+    .trim();
+
+  return text || undefined;
+}
+
+export function richPresenceText(
+  richPresence: Record<string, string> | null | undefined,
+): string | undefined {
+  if (!richPresence) {
+    return undefined;
+  }
+
+  const status = richPresence.status?.trim();
+
+  if (status) {
+    return status.startsWith('#') ? humanizePresenceToken(status) : status;
+  }
+
+  const display = richPresence.steam_display?.trim();
+
+  return display ? humanizePresenceToken(display) : undefined;
+}
+
 /** "Last online ..." text for an offline friend. */
 export function formatLastOnline(timestampSeconds: number | null | undefined): string {
   if (!timestampSeconds) {

@@ -210,6 +210,8 @@ export type CmPersona = {
   avatarHash: string | null;
   gamePlayedAppId: number | null;
   gameName: string | null;
+  /** Lower-cased Steam rich presence keys; null when the update omitted them. */
+  richPresence: Record<string, string> | null;
   lastLogoff: number | null;
   lastSeenOnline: number | null;
   personaStateFlags: number | null;
@@ -247,6 +249,34 @@ function optionalHash(fields: ProtoField[], field: number): string | null {
   return bytes.length > 0 ? bytesToHex(bytes) : null;
 }
 
+/**
+ * `CMsgClientPersonaState.Friend.rich_presence` is a repeated key/value pair
+ * sent when the client asks for `EClientPersonaStateFlag` 0x1000. Return null
+ * for an update that did not mention rich presence, so callers can keep the
+ * previous value instead of treating the absence as an empty status.
+ */
+function optionalRichPresence(fields: ProtoField[]): Record<string, string> | null {
+  const entries = allOf(fields, 71);
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const richPresence: Record<string, string> = {};
+
+  for (const entry of entries) {
+    const pair = readMessage(asBytes(entry));
+    const key = asString(firstOf(pair, 1)).toLowerCase();
+    const value = asString(firstOf(pair, 2));
+
+    if (key) {
+      richPresence[key] = value;
+    }
+  }
+
+  return richPresence;
+}
+
 export function decodePersonaState(bytes: Uint8Array): CmPersona[] {
   const fields = readMessage(bytes);
 
@@ -260,6 +290,7 @@ export function decodePersonaState(bytes: Uint8Array): CmPersona[] {
       avatarHash: optionalHash(friend, 31),
       gamePlayedAppId: optionalNumber(friend, 3),
       gameName: optionalString(friend, 55),
+      richPresence: optionalRichPresence(friend),
       lastLogoff: optionalNumber(friend, 45),
       lastSeenOnline: optionalNumber(friend, 47),
       personaStateFlags: optionalNumber(friend, 6),
@@ -600,6 +631,12 @@ export type ChatRoomSummaryPair = {
   userChatGroupState: ChatRoomUserGroupState;
 };
 
+export type CreatedChatRoomGroup = {
+  chatGroupId: string;
+  state: ChatRoomGroupState;
+  userChatGroupState: ChatRoomUserGroupState;
+};
+
 export type ChatRoomMessageReaction = {
   reactionType: number;
   reaction: string;
@@ -800,6 +837,42 @@ export function decodeChatRoomGroupsResponse(bytes: Uint8Array): ChatRoomSummary
   return allOf(readMessage(bytes), 1).map((entry) =>
     decodeChatRoomSummaryPair(asBytes(entry)),
   );
+}
+
+/**
+ * `ChatRoom.CreateChatRoomGroup#1` creates the group and invites the listed
+ * friends in one call. The shipped Android client writes an empty name from its
+ * New Chat screen, then opens the returned group. The repeated invitee field is
+ * fixed64, matching the request descriptor in the APK.
+ */
+export function encodeCreateChatRoomGroup(input: {
+  name?: string;
+  invitees: string[];
+}): Uint8Array {
+  const writer = new ProtoWriter();
+  const name = input.name?.trim();
+
+  if (name) {
+    writer.string(3, name);
+  }
+
+  for (const steamId of input.invitees) {
+    writer.fixed64(4, steamId);
+  }
+
+  return writer.finish();
+}
+
+export function decodeCreateChatRoomGroupResponse(
+  bytes: Uint8Array,
+): CreatedChatRoomGroup {
+  const fields = readMessage(bytes);
+
+  return {
+    chatGroupId: asUint64String(firstOf(fields, 1)),
+    state: decodeChatRoomGroupState(asBytes(firstOf(fields, 2))),
+    userChatGroupState: decodeChatRoomUserGroupState(asBytes(firstOf(fields, 3))),
+  };
 }
 
 export function encodeGetChatRoomGroupState(chatGroupId: string): Uint8Array {

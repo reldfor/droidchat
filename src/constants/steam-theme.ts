@@ -35,8 +35,14 @@ export const SteamColors = {
   statusRailOffline: '#464A51',
   platformBadge: '#2D77B0',
   unreadDot: '#E5B54B',
+  inGameName: '#E8F7D4',
+  inGameGame: '#9CC46B',
+  inGamePresence: '#7E9A60',
+  inGameRail: '#8FDB24',
+  gameIconBackground: '#111317',
 } as const;
 
 export const AppHeaderHeight = 56;
 export const AppMaxWidth = 560;
 export const FriendAvatarSize = 48;
+export const GameIconSize = 32;

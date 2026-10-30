@@ -28,6 +28,7 @@ import {
   decodeChatRoomAckEcho,
   decodeChatRoomGroupRoomsChange,
   decodeChatRoomGroupUserStateNotification,
+  decodeCreateChatRoomGroupResponse,
   decodeGetChatRoomGroupStateResponse,
   decodeChatRoomGroupsResponse,
   decodeChatRoomHeaderStateNotification,
@@ -50,6 +51,7 @@ import {
   encodeAckChatRoomMessage,
   encodeAckMessage,
   encodeChangeStatus,
+  encodeCreateChatRoomGroup,
   encodeGetActiveMessageSessions,
   encodeGetChatRoomGroupState,
   encodeGetChatRoomHistory,
@@ -74,6 +76,7 @@ import {
   type ChatRoomSummaryPair,
   type CmFriend,
   type CmPersona,
+  type CreatedChatRoomGroup,
   type IncomingChatRoomMessage,
   type IncomingMessage,
   type MessageSession,
@@ -92,6 +95,13 @@ const RPC_TIMEOUT_MS = 15_000;
 const CM_LIST_TIMEOUT_MS = 10_000;
 
 const SOCKET_OPEN = 1;
+
+/**
+ * `EClientPersonaStateFlag` mask for a complete friend update: status, name,
+ * presence, game name, and rich presence. Steam only sends the rich-presence
+ * key/value pairs when the 0x1000 bit is requested.
+ */
+const PERSONA_STATE_FLAGS = 0x17ff;
 
 /** Logon results that cannot be fixed by reconnecting with the same token. */
 const TERMINAL_LOGON_RESULTS = new Set<number>([
@@ -371,7 +381,8 @@ export class SteamCmClient {
 
   /**
    * Asks the CM for persona data on specific friends. `personaStateRequested`
-   * is an `EClientPersonaStateFlag` mask; 0x7ff requests every common field.
+   * is an `EClientPersonaStateFlag` mask. The mask includes rich presence so
+   * an in-game row can show the same short status line as Steam's own client.
    */
   requestFriendData(steamIds: string[]): void {
     if (steamIds.length === 0 || !this.loggedOn) {
@@ -381,7 +392,7 @@ export class SteamCmClient {
     this.sendPacket(
       EMsg.ClientRequestFriendData,
       encodeHeader({ steamId: this.steamId, clientSessionId: this.sessionId }),
-      encodeRequestFriendData(0x7ff, steamIds),
+      encodeRequestFriendData(PERSONA_STATE_FLAGS, steamIds),
     );
   }
 
@@ -408,6 +419,33 @@ export class SteamCmClient {
     );
 
     return decodeChatRoomGroupsResponse(response.body);
+  }
+
+  /**
+   * Creates a group chat and invites `invitees` in the same service call.
+   * Steam returns the full group state plus the creator's user state, so the
+   * caller can show the new group before any follow-up list refresh arrives.
+   */
+  async createChatRoomGroup(
+    invitees: string[],
+    name = '',
+  ): Promise<CreatedChatRoomGroup> {
+    if (invitees.length === 0) {
+      throw new SteamCmError(EResult.InvalidParam, 'Choose at least one friend');
+    }
+
+    const response = await this.sendServiceRequest(
+      'ChatRoom.CreateChatRoomGroup#1',
+      encodeCreateChatRoomGroup({ name, invitees }),
+    );
+    const created = decodeCreateChatRoomGroupResponse(response.body);
+
+    if (!created.chatGroupId || created.chatGroupId === '0') {
+      throw new SteamCmError(EResult.Fail, 'Steam did not return the new group chat');
+    }
+
+    this.activeChatGroupIds.add(created.chatGroupId);
+    return created;
   }
 
   /**

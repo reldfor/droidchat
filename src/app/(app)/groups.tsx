@@ -84,6 +84,7 @@ export default function GroupsScreen() {
   return (
     <View style={styles.screen}>
       <AppHeader
+        onNewChatPress={() => router.push('/new-chat')}
         onSearchPress={() => setSearchOpen(true)}
         searchPlaceholder="Search group chats"
         search={
@@ -142,7 +143,7 @@ export default function GroupsScreen() {
                 {groupError
                   ? groupError
                   : groupListLoaded
-                    ? 'Join a Steam group chat or clan chat and it will appear here.'
+                    ? 'Create a group chat or join a Steam group chat and it will appear here.'
                     : loggedOn || authError
                       ? 'Steam is sending your group chat list.'
                       : 'Group chats will load after the connection is ready.'}
@@ -155,6 +156,13 @@ export default function GroupsScreen() {
                   }}
                   style={({ pressed }) => [styles.emptyButton, pressed && styles.pressed]}>
                   <Text style={styles.emptyButtonText}>Try again</Text>
+                </Pressable>
+              ) : groupListLoaded ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => router.push('/new-chat')}
+                  style={({ pressed }) => [styles.emptyButton, pressed && styles.pressed]}>
+                  <Text style={styles.emptyButtonText}>New group chat</Text>
                 </Pressable>
               ) : null}
             </View>

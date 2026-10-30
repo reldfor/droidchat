@@ -16,6 +16,7 @@ import type {
   ChatRoomState,
   ChatRoomSummaryPair,
   ChatRoomUserGroupState,
+  CreatedChatRoomGroup,
   IncomingChatRoomMessage,
 } from '@/lib/steam/cm-proto';
 
@@ -78,6 +79,7 @@ export type GroupAction =
     }
   | { type: 'groups'; groups: ChatRoomSummaryPair[] }
   | { type: 'groups-error'; error: string }
+  | { type: 'group-created'; created: CreatedChatRoomGroup; now?: number }
   | { type: 'group-states'; states: ChatRoomGroupState[] }
   | { type: 'group-notification'; notification: ChatRoomGroupUserStateNotification }
   | { type: 'group-header'; header: ChatRoomGroupHeaderState }
@@ -713,6 +715,50 @@ export function groupReducer(state: GroupChatSlice, action: GroupAction): GroupC
 
     case 'groups-error':
       return { ...state, groupError: action.error };
+
+    case 'group-created': {
+      const created = action.created;
+      const chatGroupId = created.chatGroupId;
+
+      if (!chatGroupId) {
+        return state;
+      }
+
+      const base = state.groups[chatGroupId] ?? emptyGroup(chatGroupId);
+      let group = applyGroupState(base, created.state);
+
+      // CreateGroup returns members rather than a summary. Seed the display
+      // name list with those members so an unnamed group is not "Group chat".
+      if (group.topMemberIds.length === 0) {
+        const memberIds = created.state.members
+          .map((member) => member.accountId)
+          .filter((accountId) => accountId > 0);
+
+        if (memberIds.length > 0) {
+          group = { ...group, topMemberIds: memberIds };
+        }
+      }
+
+      if (created.userChatGroupState.chatGroupId) {
+        group = applyUserState(group, created.userChatGroupState);
+      }
+
+      // A new group has no messages yet, but it should sort near the top of the
+      // list so the person who just created it can find it again immediately.
+      const joinedAt = created.userChatGroupState.timeJoined || action.now || 0;
+
+      return {
+        ...state,
+        groupError: null,
+        groups: {
+          ...state.groups,
+          [chatGroupId]: {
+            ...group,
+            lastActivity: Math.max(group.lastActivity, joinedAt),
+          },
+        },
+      };
+    }
 
     case 'group-states': {
       let groups = state.groups;

@@ -9,6 +9,7 @@ import { ConnectionBanner } from '@/components/steam/connection-banner';
 import { SearchEmpty } from '@/components/steam/search-empty';
 import { AppMaxWidth, SteamColors } from '@/constants/steam-theme';
 import { useSteamChat, type SteamFriend } from '@/context/steam-chat';
+import { useGameAssets } from '@/hooks/use-game-assets';
 import { FRIEND_RELATIONSHIP_FRIEND } from '@/lib/steam/cm-proto';
 
 export default function FriendsScreen() {
@@ -58,9 +59,29 @@ export default function FriendsScreen() {
     [allFriends],
   );
 
+  const gameAppIds = useMemo(
+    () => [
+      ...new Set(
+        onlineFriends
+          .map((friend) => friend.gameAppId)
+          .filter((appId): appId is number => typeof appId === 'number' && appId > 0),
+      ),
+    ],
+    [onlineFriends],
+  );
+  const games = useGameAssets(gameAppIds);
+
   const normalizedQuery = query.trim().toLowerCase();
-  const matchesQuery = (friend: SteamFriend) =>
-    friend.name.toLowerCase().includes(normalizedQuery);
+  const matchesQuery = (friend: SteamFriend) => {
+    if (friend.name.toLowerCase().includes(normalizedQuery)) {
+      return true;
+    }
+
+    const gameName =
+      friend.gameName ?? (friend.gameAppId ? games[friend.gameAppId]?.name : null);
+
+    return gameName ? gameName.toLowerCase().includes(normalizedQuery) : false;
+  };
 
   const visibleOnline = normalizedQuery ? onlineFriends.filter(matchesQuery) : onlineFriends;
   const visibleOffline = normalizedQuery ? offlineFriends.filter(matchesQuery) : offlineFriends;
@@ -85,6 +106,7 @@ export default function FriendsScreen() {
   return (
     <View style={styles.screen}>
       <AppHeader
+        onNewChatPress={() => router.push('/new-chat')}
         onSearchPress={handleOpenSearch}
         searchPlaceholder="Search friends"
         search={
@@ -111,7 +133,7 @@ export default function FriendsScreen() {
           {noResults ? (
             <SearchEmpty
               icon={{ ios: 'magnifyingglass', android: 'search_off', web: 'search_off' }}
-              message={`No friends match "${query.trim()}". Try a different name.`}
+              message={`No friends match "${query.trim()}". Try a different name or game.`}
               title="No friends found"
             />
           ) : allFriends.length === 0 ? (
@@ -146,7 +168,12 @@ export default function FriendsScreen() {
                   />
                   {!onlineCollapsed
                     ? visibleOnline.map((friend) => (
-                        <FriendRow friend={friend} key={friend.steamId} onPress={handleFriendPress} />
+                        <FriendRow
+                          friend={friend}
+                          game={friend.gameAppId ? games[friend.gameAppId] : undefined}
+                          key={friend.steamId}
+                          onPress={handleFriendPress}
+                        />
                       ))
                     : null}
                 </>
@@ -162,7 +189,12 @@ export default function FriendsScreen() {
                   />
                   {!offlineCollapsed
                     ? visibleOffline.map((friend) => (
-                        <FriendRow friend={friend} key={friend.steamId} onPress={handleFriendPress} />
+                        <FriendRow
+                          friend={friend}
+                          game={friend.gameAppId ? games[friend.gameAppId] : undefined}
+                          key={friend.steamId}
+                          onPress={handleFriendPress}
+                        />
                       ))
                     : null}
                 </>

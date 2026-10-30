@@ -2,18 +2,29 @@ import { Image } from 'expo-image';
 import { SymbolView } from 'expo-symbols';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { FriendGameIcon } from '@/components/friends/friend-game-icon';
 import { FriendAvatarSize, SteamColors } from '@/constants/steam-theme';
 import type { SteamFriend } from '@/context/steam-chat';
 import { describeFriendStatus, type FriendStatus } from '@/lib/steam/chat-utils';
+import type { GameAssets } from '@/lib/steam/game-assets';
 
 type FriendRowProps = {
   friend: SteamFriend;
+  game?: GameAssets;
   onPress: (friend: SteamFriend) => void;
 };
 
-function StatusRail({ status }: { status: FriendStatus }) {
+function StatusRail({ status, inGame }: { status: FriendStatus; inGame: boolean }) {
   if (status === 'online') {
-    return <View pointerEvents="none" style={[styles.statusRail, styles.statusRailOnline]} />;
+    return (
+      <View
+        pointerEvents="none"
+        style={[
+          styles.statusRail,
+          inGame ? styles.statusRailInGame : styles.statusRailOnline,
+        ]}
+      />
+    );
   }
 
   const segmentStyle = status === 'away' ? styles.statusRailAway : styles.statusRailOffline;
@@ -27,15 +38,19 @@ function StatusRail({ status }: { status: FriendStatus }) {
   );
 }
 
-export function FriendRow({ friend, onPress }: FriendRowProps) {
+export function FriendRow({ friend, game, onPress }: FriendRowProps) {
   const online = friend.status === 'online';
   const away = friend.status === 'away';
+  const inGame = friend.status !== 'offline' && Boolean(friend.gameAppId && friend.gameAppId > 0);
+  const gameName = inGame ? (friend.gameName ?? game?.name ?? 'In-Game') : null;
 
-  const nameStyle = online
-    ? styles.nameOnline
-    : away
-      ? styles.nameAway
-      : styles.nameOffline;
+  const nameStyle = inGame
+    ? styles.nameInGame
+    : online
+      ? styles.nameOnline
+      : away
+        ? styles.nameAway
+        : styles.nameOffline;
 
   const statusStyle = online
     ? styles.statusOnline
@@ -44,16 +59,24 @@ export function FriendRow({ friend, onPress }: FriendRowProps) {
       : styles.statusOffline;
 
   const secondaryText = describeFriendStatus(friend);
+  const accessibilityStatus = inGame
+    ? [`Playing ${gameName}`, friend.richPresence].filter(Boolean).join(', ')
+    : secondaryText;
 
   return (
     <Pressable
       accessibilityHint="Opens a chat with this friend"
-      accessibilityLabel={`${friend.name}, ${secondaryText}`}
+      accessibilityLabel={`${friend.name}, ${accessibilityStatus}`}
       accessibilityRole="button"
       android_ripple={{ color: SteamColors.rowPressed }}
       onPress={() => onPress(friend)}
       style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}>
-      <View style={[styles.avatar, friend.status === 'offline' && styles.avatarOffline]}>
+      {inGame && friend.gameAppId ? (
+        <FriendGameIcon appId={friend.gameAppId} game={game} />
+      ) : null}
+
+      <View
+        style={[styles.avatar, friend.status === 'offline' && styles.avatarOffline]}>
         <Image
           accessible={false}
           contentFit="cover"
@@ -61,7 +84,7 @@ export function FriendRow({ friend, onPress }: FriendRowProps) {
           source={{ uri: friend.avatarUrl }}
           style={styles.avatarImage}
         />
-        <StatusRail status={friend.status} />
+        <StatusRail inGame={inGame} status={friend.status} />
       </View>
 
       <View style={styles.copy}>
@@ -81,9 +104,22 @@ export function FriendRow({ friend, onPress }: FriendRowProps) {
           {away ? <Text style={styles.zzz}>zZ</Text> : null}
         </View>
 
-        <Text numberOfLines={1} style={[styles.status, statusStyle]}>
-          {secondaryText}
-        </Text>
+        {inGame ? (
+          <>
+            <Text numberOfLines={1} style={styles.gameName}>
+              {gameName}
+            </Text>
+            {friend.richPresence ? (
+              <Text numberOfLines={1} style={styles.gamePresence}>
+                {friend.richPresence}
+              </Text>
+            ) : null}
+          </>
+        ) : (
+          <Text numberOfLines={1} style={[styles.status, statusStyle]}>
+            {secondaryText}
+          </Text>
+        )}
       </View>
     </Pressable>
   );
@@ -125,6 +161,9 @@ const styles = StyleSheet.create({
   },
   statusRailOnline: {
     backgroundColor: SteamColors.statusRailOnline,
+  },
+  statusRailInGame: {
+    backgroundColor: SteamColors.inGameRail,
   },
   statusRailTrack: {
     position: 'absolute',
@@ -169,6 +208,9 @@ const styles = StyleSheet.create({
   nameOffline: {
     color: SteamColors.offlineName,
   },
+  nameInGame: {
+    color: SteamColors.inGameName,
+  },
   platformBadge: {
     width: 15,
     height: 15,
@@ -197,5 +239,17 @@ const styles = StyleSheet.create({
   },
   statusOffline: {
     color: SteamColors.offlineStatus,
+  },
+  gameName: {
+    marginTop: 1,
+    color: SteamColors.inGameGame,
+    fontSize: 15,
+    lineHeight: 19,
+  },
+  gamePresence: {
+    marginTop: 1,
+    color: SteamColors.inGamePresence,
+    fontSize: 14,
+    lineHeight: 17,
   },
 });

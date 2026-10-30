@@ -71,10 +71,13 @@ function loadSource(relativePath, overrides = {}, cache = Object.keys(overrides)
 }
 
 const { SteamCmClient, SteamCmError } = loadSource('src/lib/steam/cm-client.ts');
-const { ProtoWriter, readMessage, firstOf, asUint64String } = loadSource('src/lib/steam/protobuf.ts');
-const { decodeHeader, encodeGetRecentMessages, GID_NIL } = loadSource('src/lib/steam/cm-proto.ts');
+const { ProtoWriter, readMessage, firstOf, asString, asUint64String } = loadSource('src/lib/steam/protobuf.ts');
+const { decodeHeader, decodePersonaState, encodeGetRecentMessages, GID_NIL } = loadSource('src/lib/steam/cm-proto.ts');
+const { richPresenceText } = loadSource('src/lib/steam/chat-utils.ts');
+const { loadGameAssets, parseStoreItems, communityIconUrl, gameLogoUrl } = loadSource('src/lib/steam/game-assets.ts');
 const { reduce, initialState, describeError } = loadSource('src/context/steam-chat.tsx');
 const { ConversationScreen } = loadSource('src/components/chat/conversation-screen.tsx');
+const { FriendRow } = loadSource('src/components/friends/friend-row.tsx');
 const self = '76561197960265729';
 const friend = '76561197960265730';
 
@@ -268,6 +271,125 @@ test('history start time uses the fixed32 wire type required by Steam', () => {
   assert.equal(asUint64String(firstOf(readMessage(encoded), 1)), self);
 });
 
+test('persona updates decode the game rich presence Steam sends with flag 0x1000', () => {
+  const kv = (key, value) => new ProtoWriter().string(1, key).string(2, value);
+  const body = new ProtoWriter()
+    .message(2, new ProtoWriter()
+      .fixed64(1, friend)
+      .uint32(2, 1)
+      .uint32(3, 2507950)
+      .string(15, 'Player')
+      .string(55, 'Delta Force')
+      .message(71, kv('Status', 'Online'))
+      .message(71, kv('steam_display', '#Status_Online')))
+    .finish();
+  const [persona] = decodePersonaState(body);
+  assert.equal(persona.gamePlayedAppId, 2507950);
+  assert.equal(persona.gameName, 'Delta Force');
+  assert.deepEqual(persona.richPresence, { status: 'Online', steam_display: '#Status_Online' });
+  assert.equal(richPresenceText(persona.richPresence), 'Online');
+  assert.equal(richPresenceText({ steam_display: '#Status_In_Match' }), 'In Match');
+  assert.equal(richPresenceText({ status: '#Status_In_Lobby' }), 'In Lobby');
+  assert.equal(richPresenceText(null), undefined);
+});
+
+test('a friend stops showing the previous game presence when the game changes', () => {
+  let state = reduce(initialState, {
+    type: 'friends',
+    friends: [{ steamId: friend, relationship: 3 }],
+    incremental: false,
+  });
+  const persona = {
+    steamId: friend,
+    personaState: 1,
+    playerName: 'Player',
+    avatarHash: null,
+    gamePlayedAppId: 2507950,
+    gameName: 'Delta Force',
+    richPresence: { status: 'Online' },
+    lastLogoff: null,
+    lastSeenOnline: null,
+    personaStateFlags: null,
+    onSteamDeck: null,
+    gamingDeviceType: null,
+  };
+  state = reduce(state, { type: 'persona', updates: [persona] });
+  assert.equal(state.friends[friend].richPresence, 'Online');
+  state = reduce(state, {
+    type: 'persona',
+    updates: [{ ...persona, gamePlayedAppId: 1938090, gameName: 'Call of Duty®', richPresence: null }],
+  });
+  assert.equal(state.friends[friend].gameName, 'Call of Duty®');
+  assert.equal(state.friends[friend].richPresence, undefined);
+});
+
+test('store items resolve to stable community icon and wordmark URLs', () => {
+  const items = parseStoreItems({
+    response: {
+      store_items: [
+        { appid: 2507950, name: 'Delta Force', assets: { community_icon: 'abc123' } },
+        { appid: 1938090, name: 'Call of Duty®', assets: {} },
+        { appid: 'invalid', assets: { community_icon: 'nope' } },
+      ],
+    },
+  });
+  assert.deepEqual(items, [
+    { appId: 2507950, name: 'Delta Force', iconUrl: communityIconUrl(2507950, 'abc123') },
+    { appId: 1938090, name: 'Call of Duty®', iconUrl: null },
+  ]);
+  assert.equal(communityIconUrl(2507950, 'abc123'), 'https://shared.steamstatic.com/community_assets/images/apps/2507950/abc123.jpg');
+  assert.equal(gameLogoUrl(2507950), 'https://shared.steamstatic.com/store_item_assets/steam/apps/2507950/logo.png');
+  assert.deepEqual(parseStoreItems(null), []);
+});
+
+test('game assets load in one batched request and reuse the session cache', async () => {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      json: async () => ({
+        response: {
+          store_items: [
+            { appid: 9999991, name: 'Test Game', assets: { community_icon: 'abc123' } },
+          ],
+        },
+      }),
+    };
+  };
+
+  try {
+    const first = await loadGameAssets([9999991, 9999992]);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(first[9999991], {
+      appId: 9999991,
+      name: 'Test Game',
+      iconUrl: communityIconUrl(9999991, 'abc123'),
+    });
+    assert.equal(first[9999992], undefined);
+
+    const second = await loadGameAssets([9999991]);
+    assert.equal(calls.length, 1);
+    assert.equal(second[9999991].name, 'Test Game');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('a failed store request leaves the friends list on its fallback path', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    throw new Error('offline');
+  };
+
+  try {
+    assert.deepEqual(await loadGameAssets([9999993]), {});
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 function renderConversation(props) {
   const noop = () => {};
   return renderToStaticMarkup(React.createElement(ConversationScreen, {
@@ -291,6 +413,33 @@ test('a failed history load offers Retry without claiming the conversation is em
   assert.doesNotMatch(failed, /progressbar|No messages yet/);
   assert.match(failed, /Could not load this conversation/);
   assert.match(failed, /<button><span>Retry<\/span><\/button>/);
+});
+
+test('an in-game friend row shows the game icon, game name and rich presence', () => {
+  const html = renderToStaticMarkup(React.createElement(FriendRow, {
+    friend: {
+      steamId: friend,
+      accountId: 1,
+      name: 'Player',
+      avatarUrl: 'https://example.com/avatar.jpg',
+      status: 'online',
+      gameAppId: 2507950,
+      gameName: 'Delta Force',
+      richPresence: 'Online',
+      onSteamDeck: false,
+      relationship: 3,
+    },
+    game: {
+      appId: 2507950,
+      name: 'Delta Force',
+      iconUrl: communityIconUrl(2507950, 'abc123'),
+    },
+    onPress: () => {},
+  }));
+  assert.match(html, /aria-label="Player, Playing Delta Force, Online"/);
+  assert.match(html, /Delta Force/);
+  assert.match(html, />Online</);
+  assert.match(html, /community_assets\/images\/apps\/2507950\/abc123\.jpg/);
 });
 
 const { decodeEmoticonList, parseMessageContent } = loadSource('src/lib/steam/chat-media.ts');
@@ -870,6 +1019,56 @@ function groupFixture() {
   return { groupId, generalId, voiceId, summary, userState, pair, response };
 }
 
+function createdGroupFixture(name = '') {
+  const groupId = '900719925474099';
+  const generalId = '900719925474100';
+
+  const header = new ProtoWriter()
+    .uint64(1, groupId)
+    .string(2, name)
+    .uint32(13, 0)
+    .uint32(14, 42)
+    .string(15, '')
+    .uint32(21, 0)
+    .bool(26, false)
+    .finish();
+  const owner = new ProtoWriter()
+    .uint32(1, 42)
+    .uint32(3, 1)
+    .uint32(4, 0)
+    .finish();
+  const invitee = new ProtoWriter()
+    .uint32(1, 43)
+    .uint32(3, 1)
+    .uint32(4, 0)
+    .finish();
+  const general = new ProtoWriter()
+    .uint64(1, generalId)
+    .string(2, 'General')
+    .uint32(6, 0)
+    .finish();
+  const state = new ProtoWriter()
+    .bytes(1, header)
+    .bytes(2, owner)
+    .bytes(2, invitee)
+    .uint64(4, generalId)
+    .bytes(5, general)
+    .finish();
+  const userState = new ProtoWriter()
+    .uint64(1, groupId)
+    .uint32(2, 1_700_000_000)
+    .uint32(6, 1_700_000_000)
+    .bool(7, false)
+    .finish();
+  const response = new ProtoWriter()
+    .uint64(1, groupId)
+    .bytes(2, state)
+    .bytes(3, userState)
+    .finish();
+
+  return { groupId, generalId, response, state, userState };
+}
+
 test('group summaries and user state decode including packed member fields', () => {
   const fixture = groupFixture();
   const groups = groupProto.decodeChatRoomGroupsResponse(fixture.response);
@@ -942,6 +1141,89 @@ test('group history request uses the wire field numbers from the app descriptor'
   assert.equal(Number(firstOf(fields, 3).value), 1_700_000_000);
   assert.equal(Number(firstOf(fields, 4).value), 4);
   assert.equal(Number(firstOf(fields, 7).value), 100);
+});
+
+test('group creation request matches the shipped ChatRoom descriptor', () => {
+  const other = '76561197960265731';
+  const body = groupProto.encodeCreateChatRoomGroup({
+    name: 'Friday Night',
+    invitees: [friend, other],
+  });
+  const fields = readMessage(body);
+  const invitees = fields.filter((entry) => entry.field === 4);
+
+  assert.equal(asString(firstOf(fields, 3)), 'Friday Night');
+  assert.equal(invitees.length, 2);
+  // Repeated fixed64 (wire type 1) is what the APK request descriptor uses.
+  assert.equal(invitees[0].wire, 1);
+  assert.equal(asUint64String(invitees[0]), friend);
+  assert.equal(asUint64String(invitees[1]), other);
+
+  const unnamed = readMessage(groupProto.encodeCreateChatRoomGroup({ invitees: [friend] }));
+  assert.equal(firstOf(unnamed, 3), undefined);
+});
+
+test('created group response decodes group state and creator user state', () => {
+  const fixture = createdGroupFixture('Friday Night');
+  const created = groupProto.decodeCreateChatRoomGroupResponse(fixture.response);
+
+  assert.equal(created.chatGroupId, fixture.groupId);
+  assert.equal(created.state.headerState.chatGroupId, fixture.groupId);
+  assert.equal(created.state.headerState.name, 'Friday Night');
+  assert.equal(created.state.defaultChatId, fixture.generalId);
+  assert.equal(created.state.members.length, 2);
+  assert.equal(created.state.members[0].accountId, 42);
+  assert.equal(created.state.chatRooms[0].name, 'General');
+  assert.equal(created.userChatGroupState.chatGroupId, fixture.groupId);
+  assert.equal(created.userChatGroupState.timeLastGroupAck, 1_700_000_000);
+});
+
+test('creating a group adds it immediately with member-derived display names', () => {
+  const fixture = createdGroupFixture();
+  const created = groupProto.decodeCreateChatRoomGroupResponse(fixture.response);
+  const { groupReducer, initialGroupChatState, groupDisplayName } = groupStateModule;
+
+  const state = groupReducer(initialGroupChatState, {
+    type: 'group-created',
+    created,
+  });
+  const group = state.groups[fixture.groupId];
+
+  assert.ok(group);
+  assert.equal(group.roomOrder[0], fixture.generalId);
+  assert.equal(group.selectedChatId, fixture.generalId);
+  assert.equal(group.memberCount, 2);
+  assert.deepEqual(group.topMemberIds, [42, 43]);
+  assert.equal(group.userState.timeLastGroupAck, 1_700_000_000);
+  assert.equal(group.lastActivity, 1_700_000_000);
+  assert.equal(group.unread, false);
+
+  const display = groupDisplayName(
+    group,
+    {},
+    {
+      '76561197960265770': { name: 'Alpha' },
+      '76561197960265771': { name: 'Bravo' },
+    },
+    null,
+  );
+  assert.equal(display, 'Alpha, Bravo');
+});
+
+test('CM group creation sends the service name and decodes the new group', async (t) => {
+  const { client, sent } = setup(t);
+  const fixture = createdGroupFixture('Friday Night');
+  const creating = client.createChatRoomGroup([friend]);
+
+  await reply(client, sent[0], fixture.response);
+  const created = await creating;
+
+  assert.equal(sent[0].header.targetJobName, 'ChatRoom.CreateChatRoomGroup#1');
+  assert.equal(asUint64String(firstOf(readMessage(sent[0].body), 4)), friend);
+  assert.equal(created.chatGroupId, fixture.groupId);
+  assert.equal(created.state.chatRooms[0].name, 'General');
+
+  await assert.rejects(client.createChatRoomGroup([]), /Choose at least one friend/);
 });
 
 test('group reducer merges summaries, room messages and per-room read receipts', () => {

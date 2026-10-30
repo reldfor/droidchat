@@ -23,6 +23,11 @@ colors:
   settings-switch-off: "#3B4048"
   settings-switch-on: "#2C8C86"
   settings-link: "#3B9EDB"
+  in-game-name: "#E8F7D4"
+  in-game-game: "#9CC46B"
+  in-game-presence: "#7E9A60"
+  in-game-rail: "#8FDB24"
+  game-icon-background: "#111317"
 typography:
   body:
     fontSize: "15.5px"
@@ -134,6 +139,8 @@ Controls, image previews, and the emoticon search field use small rounded corner
 
 **Messages.** Outgoing content uses the blue bubble; incoming content uses the raised canvas tone. Images and emoticons render inline with readable asset fallbacks. Timestamps and send state sit outside the bubble. Shared images open their full version through a labeled action.
 
+**In-game friend rows.** An online friend who is playing a game gets a 32-unit game tile before the normal 48-unit avatar. The presence rail switches from Steam blue to the bright game green, the name takes a pale green tint, and the second and third lines carry the game name and the game's short rich-presence status. A friend without rich presence keeps only the game-name line, matching Steam's own client. Game tiles use the store community icon, fall back to the store wordmark, then to a gamepad symbol; the game name falls back to the store name when the persona payload has no name. This green treatment is local to game presence; ordinary online, away, and offline rows keep their existing blue and neutral roles.
+
 ## Do's and Don'ts
 
 - **Do** preserve the existing token palette and compact mobile control geometry.
@@ -143,4 +150,4 @@ Controls, image previews, and the emoticon search field use small rounded corner
 - **Don't** replace symbol controls with decorative emoji or text glyphs.
 - **Don't** treat synthetic web-preview content as product or native-device evidence.
 
-Recorded from the theme and chat components on 2026-10-27. Settings surfaces added 2026-10-29 from the supplied Settings and Interface mockups. The supplied 320- and 390-pixel captures are React Native Web previews with synthetic content. Native device capture and live Steam upload verification were unavailable; no device-specific visual certification is implied.
+Recorded from the theme and chat components on 2026-10-27. Settings surfaces added 2026-10-29 from the supplied Settings and Interface mockups. In-game friend rows added 2026-10-30 from the supplied friends-game mockup; store metadata comes from Steam's public StoreBrowse service. The supplied 320- and 390-pixel captures are React Native Web previews with synthetic content. Native device capture and live Steam upload verification were unavailable; no device-specific visual certification is implied.

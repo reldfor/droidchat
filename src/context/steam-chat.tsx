@@ -33,6 +33,7 @@ import {
   buildAvatarUrl,
   generateClientMessageId,
   personaStatus,
+  richPresenceText,
   steamIdFromAccountId,
   stripBbcode,
   type FriendStatus,
@@ -217,6 +218,8 @@ export type SteamFriend = {
   status: FriendStatus;
   gameAppId?: number;
   gameName?: string;
+  /** Short status line published by the running game, e.g. "Online". */
+  richPresence?: string;
   lastOnline?: number;
   onSteamDeck: boolean;
   relationship: number;
@@ -363,11 +366,20 @@ function emptyConversation(steamId: string): Conversation {
 function mergePersona(friend: SteamFriend, update: CmPersona): SteamFriend {
   const status =
     update.personaState === null ? friend.status : personaStatus(update.personaState);
-  const gameAppId = update.gamePlayedAppId ?? friend.gameAppId;
+  const appChanged =
+    update.gamePlayedAppId !== null && update.gamePlayedAppId !== friend.gameAppId;
+  const gameAppId =
+    update.personaState === 0 ? undefined : (update.gamePlayedAppId ?? friend.gameAppId);
   const gameName =
     update.personaState === 0
       ? undefined
-      : (update.gameName ?? (update.gamePlayedAppId === null ? friend.gameName : undefined));
+      : (update.gameName ?? (appChanged ? undefined : friend.gameName));
+  const richPresence =
+    update.richPresence !== null
+      ? richPresenceText(update.richPresence)
+      : update.personaState === 0 || appChanged
+        ? undefined
+        : friend.richPresence;
 
   return {
     ...friend,
@@ -376,6 +388,7 @@ function mergePersona(friend: SteamFriend, update: CmPersona): SteamFriend {
     status,
     gameAppId,
     gameName,
+    richPresence,
     lastOnline: update.lastSeenOnline ?? update.lastLogoff ?? friend.lastOnline,
     onSteamDeck: update.onSteamDeck ?? friend.onSteamDeck,
   };
@@ -550,6 +563,7 @@ function reduce(state: SteamChatState, action: Action): SteamChatState {
             status: existing.status,
             gameAppId: existing.gameAppId,
             gameName: existing.gameName,
+            richPresence: existing.richPresence,
             lastOnline: existing.lastOnline ?? friend.lastOnline,
             onSteamDeck: existing.onSteamDeck,
           };
@@ -1060,6 +1074,7 @@ type SteamChatContextValue = SteamChatState &
     sendTyping: (steamId: string) => void;
     retryConnection: () => void;
     refreshGroups: () => Promise<void>;
+    createGroupChat: (invitees: string[], name?: string) => Promise<string>;
     openGroup: (chatGroupId: string, chatId?: string) => void;
     closeGroup: (chatGroupId: string) => void;
     selectGroupRoom: (chatGroupId: string, chatId: string) => void;
@@ -1092,6 +1107,8 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
   /** Identifies the client allowed to mutate state; blocks late events after switches. */
   const clientTokenRef = useRef<symbol | null>(null);
   const personaFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Friend/app pairs already asked for rich presence in this connection. */
+  const richPresenceRequests = useRef(new Set<string>());
   const typingTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const typingSentAt = useRef(new Map<string, number>());
   /** Account whose disk cache is trusted for the current state. */
@@ -1307,6 +1324,45 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       }
     }, PERSONA_FALLBACK_DELAY_MS);
   }, []);
+
+  /**
+   * Rich presence is opt-in per friend request. Ask once for every friend that
+   * is currently in a game, then let normal persona pushes keep it current.
+   */
+  useEffect(() => {
+    if (!state.loggedOn) {
+      richPresenceRequests.current.clear();
+      return;
+    }
+
+    const client = clientRef.current;
+    const friends = Object.values(state.friends).filter(
+      (friend) =>
+        friend.relationship === FRIEND_RELATIONSHIP_FRIEND &&
+        friend.status !== 'offline' &&
+        Boolean(friend.gameAppId) &&
+        !friend.richPresence,
+    );
+
+    if (!client?.isLoggedOn || friends.length === 0) {
+      return;
+    }
+
+    const steamIds: string[] = [];
+
+    for (const friend of friends) {
+      const key = `${friend.steamId}:${friend.gameAppId}`;
+
+      if (!richPresenceRequests.current.has(key)) {
+        richPresenceRequests.current.add(key);
+        steamIds.push(friend.steamId);
+      }
+    }
+
+    if (steamIds.length > 0) {
+      client.requestFriendData(steamIds);
+    }
+  }, [state.friends, state.loggedOn]);
 
   const loadConversation = useCallback((steamId: string, force = false) => {
     const client = clientRef.current;
@@ -1617,6 +1673,61 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       }
     }
   }, [applyGroups]);
+
+  const createGroupChat = useCallback(
+    async (invitees: string[], name = '') => {
+      const client = clientRef.current;
+      const clientToken = clientTokenRef.current;
+      const selfSteamId = stateRef.current.selfSteamId;
+
+      if (!client?.isLoggedOn || !clientToken || !selfSteamId) {
+        throw new Error('Reconnect to Steam before creating a group chat.');
+      }
+
+      const uniqueInvitees = [...new Set(invitees)].filter(
+        (steamId) => steamId.length > 0 && steamId !== selfSteamId,
+      );
+
+      if (uniqueInvitees.length === 0) {
+        throw new Error('Choose at least one friend to invite.');
+      }
+
+      try {
+        const created = await client.createChatRoomGroup(uniqueInvitees, name);
+
+        if (clientTokenRef.current !== clientToken) {
+          throw new SteamCmError(
+            EResult.Fail,
+            'The account changed before the group chat was created.',
+          );
+        }
+
+        groupDispatch({
+          type: 'group-created',
+          created,
+          now: Math.floor(Date.now() / 1000),
+        });
+
+        requestGroupProfiles(
+          created.state.members
+            .map((member) => steamIdFromAccountId(member.accountId))
+            .filter((steamId) => steamId !== selfSteamId),
+        );
+
+        // The creator must join the active set just like every group loaded
+        // from GetMyChatRoomGroups, otherwise live messages are not pushed.
+        const groupIds = [
+          ...new Set([...Object.keys(groupStateRef.current.groups), created.chatGroupId]),
+        ];
+        activateGroups(groupIds, clientToken);
+
+        return created.chatGroupId;
+      } catch (error) {
+        throw new Error(describeError(error));
+      }
+    },
+    [activateGroups, requestGroupProfiles],
+  );
 
   const loadGroupHistory = useCallback((chatGroupId: string, chatId: string, force = false) => {
     const client = clientRef.current;
@@ -2425,6 +2536,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       sendTyping,
       retryConnection,
       refreshGroups,
+      createGroupChat,
       openGroup,
       closeGroup,
       selectGroupRoom,
@@ -2451,6 +2563,7 @@ export function SteamChatProvider({ children }: { children: ReactNode }) {
       sendTyping,
       retryConnection,
       refreshGroups,
+      createGroupChat,
       openGroup,
       closeGroup,
       selectGroupRoom,

@@ -60,6 +60,7 @@ export default function ChatsScreen() {
   return (
     <View style={styles.screen}>
       <AppHeader
+        onNewChatPress={() => router.push('/new-chat')}
         onSearchPress={() => setSearchOpen(true)}
         searchPlaceholder="Search chats"
         search={

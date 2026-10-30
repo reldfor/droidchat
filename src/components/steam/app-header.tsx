@@ -24,6 +24,7 @@ type AppHeaderProps = {
   search?: HeaderSearch;
   searchPlaceholder?: string;
   onSearchPress?: () => void;
+  onNewChatPress?: () => void;
   onAddPress?: () => void;
   addLabel?: string;
 };
@@ -32,6 +33,7 @@ export function AppHeader({
   search,
   searchPlaceholder = 'Search friends',
   onSearchPress,
+  onNewChatPress,
   onAddPress,
   addLabel = 'Add friend',
 }: AppHeaderProps) {
@@ -131,6 +133,23 @@ export function AppHeader({
                   <SymbolView
                     name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
                     size={23}
+                    tintColor={SteamColors.icon}
+                  />
+                </Pressable>
+              ) : null}
+
+              {onNewChatPress ? (
+                <Pressable
+                  accessibilityLabel="New chat"
+                  accessibilityRole="button"
+                  onPress={onNewChatPress}
+                  style={({ pressed }) => [
+                    styles.iconButton,
+                    pressed && styles.iconButtonPressed,
+                  ]}>
+                  <SymbolView
+                    name={{ ios: 'plus.bubble', android: 'add_comment', web: 'add_comment' }}
+                    size={24}
                     tintColor={SteamColors.icon}
                   />
                 </Pressable>
