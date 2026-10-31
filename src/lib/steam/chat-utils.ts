@@ -136,6 +136,22 @@ export function formatChatListTime(timestampSeconds: number): string {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'numeric', day: 'numeric' });
 }
 
+/**
+ * The game a friend is currently playing, or null when they are not in one.
+ * The persona's own game name is authoritative; the store name is only a
+ * fallback for clients that receive the app id without the name.
+ */
+export function inGameName(
+  friend: { status: FriendStatus; gameAppId?: number; gameName?: string },
+  storeName?: string | null,
+): string | null {
+  if (friend.status === 'offline' || !friend.gameAppId || friend.gameAppId <= 0) {
+    return null;
+  }
+
+  return friend.gameName ?? storeName ?? 'In-Game';
+}
+
 /** Secondary line under a friend's name. */
 export function describeFriendStatus(friend: {
   status: FriendStatus;

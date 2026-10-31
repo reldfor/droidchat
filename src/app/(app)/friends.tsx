@@ -10,6 +10,7 @@ import { SearchEmpty } from '@/components/steam/search-empty';
 import { AppMaxWidth, SteamColors } from '@/constants/steam-theme';
 import { useSteamChat, type SteamFriend } from '@/context/steam-chat';
 import { useGameAssets } from '@/hooks/use-game-assets';
+import { inGameName } from '@/lib/steam/chat-utils';
 import { FRIEND_RELATIONSHIP_FRIEND } from '@/lib/steam/cm-proto';
 
 export default function FriendsScreen() {
@@ -77,8 +78,10 @@ export default function FriendsScreen() {
       return true;
     }
 
-    const gameName =
-      friend.gameName ?? (friend.gameAppId ? games[friend.gameAppId]?.name : null);
+    const gameName = inGameName(
+      friend,
+      friend.gameAppId ? games[friend.gameAppId]?.name : null,
+    );
 
     return gameName ? gameName.toLowerCase().includes(normalizedQuery) : false;
   };

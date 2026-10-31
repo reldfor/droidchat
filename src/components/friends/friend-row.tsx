@@ -5,7 +5,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { FriendGameIcon } from '@/components/friends/friend-game-icon';
 import { FriendAvatarSize, SteamColors } from '@/constants/steam-theme';
 import type { SteamFriend } from '@/context/steam-chat';
-import { describeFriendStatus, type FriendStatus } from '@/lib/steam/chat-utils';
+import { describeFriendStatus, inGameName, type FriendStatus } from '@/lib/steam/chat-utils';
 import type { GameAssets } from '@/lib/steam/game-assets';
 
 type FriendRowProps = {
@@ -41,8 +41,8 @@ function StatusRail({ status, inGame }: { status: FriendStatus; inGame: boolean 
 export function FriendRow({ friend, game, onPress }: FriendRowProps) {
   const online = friend.status === 'online';
   const away = friend.status === 'away';
-  const inGame = friend.status !== 'offline' && Boolean(friend.gameAppId && friend.gameAppId > 0);
-  const gameName = inGame ? (friend.gameName ?? game?.name ?? 'In-Game') : null;
+  const gameName = inGameName(friend, game?.name);
+  const inGame = gameName !== null;
 
   const nameStyle = inGame
     ? styles.nameInGame

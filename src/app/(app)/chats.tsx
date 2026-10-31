@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   BackHandler,
@@ -16,6 +16,8 @@ import { ConnectionBanner } from '@/components/steam/connection-banner';
 import { SearchEmpty } from '@/components/steam/search-empty';
 import { AppMaxWidth, SteamColors } from '@/constants/steam-theme';
 import { useSteamChat, type ChatListItem } from '@/context/steam-chat';
+import { useGameAssets } from '@/hooks/use-game-assets';
+import { inGameName } from '@/lib/steam/chat-utils';
 
 export default function ChatsScreen() {
   const router = useRouter();
@@ -38,14 +40,35 @@ export default function ChatsScreen() {
     return () => subscription.remove();
   }, [searchOpen]);
 
+  const gameAppIds = useMemo(
+    () => [
+      ...new Set(
+        chats
+          .map((chat) => chat.friend.gameAppId)
+          .filter((appId): appId is number => typeof appId === 'number' && appId > 0),
+      ),
+    ],
+    [chats],
+  );
+  const games = useGameAssets(gameAppIds);
+
   const normalizedQuery = query.trim().toLowerCase();
-  const visibleChats = normalizedQuery
-    ? chats.filter(
-        (chat) =>
-          chat.friend.name.toLowerCase().includes(normalizedQuery) ||
-          chat.conversation.preview?.text.toLowerCase().includes(normalizedQuery),
-      )
-    : chats;
+  const matchesQuery = (chat: ChatListItem) => {
+    if (
+      chat.friend.name.toLowerCase().includes(normalizedQuery) ||
+      chat.conversation.preview?.text.toLowerCase().includes(normalizedQuery)
+    ) {
+      return true;
+    }
+
+    const gameName = inGameName(
+      chat.friend,
+      chat.friend.gameAppId ? games[chat.friend.gameAppId]?.name : null,
+    );
+
+    return gameName ? gameName.toLowerCase().includes(normalizedQuery) : false;
+  };
+  const visibleChats = normalizedQuery ? chats.filter(matchesQuery) : chats;
   const noResults = normalizedQuery.length > 0 && visibleChats.length === 0;
 
   const handleCancelSearch = () => {
@@ -87,7 +110,7 @@ export default function ChatsScreen() {
           {noResults ? (
             <SearchEmpty
               icon={{ ios: 'magnifyingglass', android: 'search_off', web: 'search_off' }}
-              message={`No chats match "${query.trim()}". Try a different name.`}
+              message={`No chats match "${query.trim()}". Try a different name or game.`}
               title="No chats found"
             />
           ) : chats.length === 0 ? (
@@ -116,6 +139,7 @@ export default function ChatsScreen() {
             visibleChats.map((chat) => (
               <ChatRow
                 friend={chat.friend}
+                game={chat.friend.gameAppId ? games[chat.friend.gameAppId] : undefined}
                 key={chat.friend.steamId}
                 onPress={() => handleChatPress(chat)}
                 preview={chat.conversation.preview}

@@ -1,27 +1,35 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { FriendGameIcon } from '@/components/friends/friend-game-icon';
 import { SteamColors } from '@/constants/steam-theme';
 import type { ChatPreview, SteamFriend } from '@/context/steam-chat';
-import { formatChatListTime } from '@/lib/steam/chat-utils';
+import { formatChatListTime, inGameName } from '@/lib/steam/chat-utils';
+import type { GameAssets } from '@/lib/steam/game-assets';
 import { ChatAvatar } from './chat-avatar';
 
 type ChatRowProps = {
   friend: SteamFriend;
+  game?: GameAssets;
   preview?: ChatPreview;
   unread: number;
   onPress: () => void;
 };
 
-export function ChatRow({ friend, preview, unread, onPress }: ChatRowProps) {
+export function ChatRow({ friend, game, preview, unread, onPress }: ChatRowProps) {
   const timestamp = preview ? formatChatListTime(preview.sentAt) : '';
   const previewText = preview
     ? `${preview.mine ? 'You: ' : ''}${preview.text}`
     : 'No messages yet';
+  const gameName = inGameName(friend, game?.name);
+  const inGame = gameName !== null;
+  const gameLabel = inGame
+    ? `Playing ${gameName}${friend.richPresence ? `, ${friend.richPresence}` : ''}. `
+    : '';
 
   return (
     <Pressable
       accessibilityHint="Opens the conversation"
-      accessibilityLabel={`${friend.name}. ${previewText}. ${timestamp}${
+      accessibilityLabel={`${friend.name}. ${gameLabel}${previewText}. ${timestamp}${
         unread > 0 ? `. ${unread} unread` : ''
       }`}
       accessibilityRole="button"
@@ -32,11 +40,25 @@ export function ChatRow({ friend, preview, unread, onPress }: ChatRowProps) {
 
       <View style={styles.copy}>
         <View style={styles.titleRow}>
-          <Text numberOfLines={1} style={styles.name}>
+          <Text numberOfLines={1} style={[styles.name, inGame && styles.nameInGame]}>
             {friend.name}
           </Text>
           <Text style={styles.timestamp}>{timestamp}</Text>
         </View>
+
+        {inGame ? (
+          <View style={styles.gameRow}>
+            {friend.gameAppId ? (
+              <FriendGameIcon appId={friend.gameAppId} game={game} size={16} />
+            ) : null}
+            <Text numberOfLines={1} style={styles.gameName}>
+              {gameName}
+              {friend.richPresence ? (
+                <Text style={styles.gamePresence}> · {friend.richPresence}</Text>
+              ) : null}
+            </Text>
+          </View>
+        ) : null}
 
         <View style={styles.previewRow}>
           <Text
@@ -82,10 +104,30 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     letterSpacing: 0.1,
   },
+  nameInGame: {
+    color: SteamColors.inGameName,
+  },
   timestamp: {
     color: SteamColors.muted,
     fontSize: 12,
     lineHeight: 16,
+  },
+  gameRow: {
+    marginTop: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingRight: 8,
+  },
+  gameName: {
+    flexShrink: 1,
+    color: SteamColors.inGameGame,
+    fontSize: 13.5,
+    lineHeight: 17,
+  },
+  gamePresence: {
+    color: SteamColors.inGamePresence,
+    fontSize: 13,
   },
   previewRow: {
     marginTop: 2,

@@ -6,6 +6,7 @@ import { ConversationScreen } from '@/components/chat/conversation-screen';
 import { ScreenHeader } from '@/components/steam/screen-header';
 import { SteamColors } from '@/constants/steam-theme';
 import { useSteamChat } from '@/context/steam-chat';
+import { useGameAssets } from '@/hooks/use-game-assets';
 
 export default function FriendChatScreen() {
   const router = useRouter();
@@ -43,6 +44,8 @@ export default function FriendChatScreen() {
   }, [steamId, openConversation, closeConversation]);
 
   const friend = steamId ? friends[steamId] : undefined;
+  const gameAppId = friend?.gameAppId ?? null;
+  const games = useGameAssets(gameAppId ? [gameAppId] : []);
   const conversation = steamId ? conversations[steamId] : undefined;
   const friendTyping = steamId ? Boolean(typing[steamId]) : false;
   const lastMessageAt = conversation?.messages[conversation.messages.length - 1]?.sentAt ?? 0;
@@ -106,6 +109,7 @@ export default function FriendChatScreen() {
       error={conversation?.error}
       friend={friend}
       friendTyping={friendTyping}
+      game={gameAppId ? games[gameAppId] : undefined}
       hasMore={conversation?.hasMore ?? false}
       loading={conversation?.loading ?? false}
       messages={conversation?.messages ?? []}

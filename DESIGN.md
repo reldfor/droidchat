@@ -141,6 +141,8 @@ Controls, image previews, and the emoticon search field use small rounded corner
 
 **In-game friend rows.** An online friend who is playing a game gets a 32-unit game tile before the normal 48-unit avatar. The presence rail switches from Steam blue to the bright game green, the name takes a pale green tint, and the second and third lines carry the game name and the game's short rich-presence status. A friend without rich presence keeps only the game-name line, matching Steam's own client. Game tiles use the store community icon, fall back to the store wordmark, then to a gamepad symbol; the game name falls back to the store name when the persona payload has no name. This green treatment is local to game presence; ordinary online, away, and offline rows keep their existing blue and neutral roles.
 
+**In-game chat presence.** Chat rows repeat the friends-list hierarchy in a compact form: the name takes the pale green tint, and a 16-unit game tile, game name, and optional rich presence sit above the last-message preview. The conversation header keeps its 46-unit avatar and adds a 20-unit game tile beside the game name, with the rich-presence line below; `typing…` temporarily replaces that line without hiding the game. Chat search matches game names alongside friend names and message text. These surfaces use the same store fallbacks as the friends list.
+
 ## Do's and Don'ts
 
 - **Do** preserve the existing token palette and compact mobile control geometry.

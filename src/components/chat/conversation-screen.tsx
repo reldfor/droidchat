@@ -16,12 +16,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ChatAvatar } from '@/components/chats/chat-avatar';
+import { FriendGameIcon } from '@/components/friends/friend-game-icon';
 import { MessageBubble } from '@/components/chat/message-bubble';
 import { EmoticonPicker } from '@/components/chat/emoticon-picker';
 import { AppMaxWidth, SteamColors } from '@/constants/steam-theme';
 import type { ChatMessage, SteamFriend } from '@/context/steam-chat';
 import type { SteamCmConnectionState } from '@/lib/steam/cm-client';
-import { describeFriendStatus } from '@/lib/steam/chat-utils';
+import { describeFriendStatus, inGameName } from '@/lib/steam/chat-utils';
+import type { GameAssets } from '@/lib/steam/game-assets';
 import { pickChatImage, type ChatImage } from '@/lib/steam/image-picker';
 import { ImageUploadError } from '@/lib/steam/image-upload';
 import type { SteamEmoticon } from '@/lib/steam/chat-media';
@@ -32,6 +34,8 @@ type ConversationScreenProps = {
   error?: string;
   friend: SteamFriend;
   friendTyping: boolean;
+  /** Store metadata for the game this friend is playing, when available. */
+  game?: GameAssets;
   hasMore: boolean;
   loading: boolean;
   messages: ChatMessage[];
@@ -52,6 +56,7 @@ export function ConversationScreen({
   error,
   friend,
   friendTyping,
+  game,
   hasMore,
   loading,
   messages,
@@ -169,6 +174,8 @@ export function ConversationScreen({
   const status = describeFriendStatus(friend);
   const connectionLabel =
     connection === 'connected' ? 'Signing in to Steam…' : 'Reconnecting to Steam…';
+  const gameName = inGameName(friend, game?.name);
+  const inGame = gameName !== null;
   const subtitle = friendTyping ? 'typing…' : status;
   const retry = authError ? onRetry : error && ready ? onRetryHistory : undefined;
 
@@ -199,12 +206,37 @@ export function ConversationScreen({
             <ChatAvatar name={friend.name} size={46} uri={friend.avatarUrl} />
 
             <View style={styles.titleCopy}>
-              <Text numberOfLines={1} style={styles.title}>
+              <Text numberOfLines={1} style={[styles.title, inGame && styles.titleInGame]}>
                 {friend.name}
               </Text>
-              <Text numberOfLines={1} style={styles.subtitle}>
-                {subtitle}
-              </Text>
+
+              {inGame ? (
+                <>
+                  <View style={styles.gameLine}>
+                    {friend.gameAppId ? (
+                      <FriendGameIcon appId={friend.gameAppId} game={game} size={20} />
+                    ) : null}
+                    <Text numberOfLines={1} style={styles.gameName}>
+                      {gameName}
+                    </Text>
+                  </View>
+                  {friendTyping ? (
+                    <Text numberOfLines={1} style={[styles.subtitle, styles.presenceLine]}>
+                      {subtitle}
+                    </Text>
+                  ) : friend.richPresence ? (
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.subtitle, styles.presenceLine, styles.gamePresence]}>
+                      {friend.richPresence}
+                    </Text>
+                  ) : null}
+                </>
+              ) : (
+                <Text numberOfLines={1} style={styles.subtitle}>
+                  {subtitle}
+                </Text>
+              )}
             </View>
           </View>
 
@@ -420,11 +452,33 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     letterSpacing: 0.1,
   },
+  titleInGame: {
+    color: SteamColors.inGameName,
+  },
   subtitle: {
     marginTop: 1,
     color: SteamColors.muted,
     fontSize: 14,
     lineHeight: 18,
+  },
+  gameLine: {
+    marginTop: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  gameName: {
+    flexShrink: 1,
+    color: SteamColors.inGameGame,
+    fontSize: 14,
+    lineHeight: 18,
+  },
+  presenceLine: {
+    fontSize: 13.5,
+    lineHeight: 17,
+  },
+  gamePresence: {
+    color: SteamColors.inGamePresence,
   },
   banner: {
     flexDirection: 'row',

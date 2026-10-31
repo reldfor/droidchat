@@ -77,6 +77,7 @@ const { richPresenceText } = loadSource('src/lib/steam/chat-utils.ts');
 const { loadGameAssets, parseStoreItems, communityIconUrl, gameLogoUrl } = loadSource('src/lib/steam/game-assets.ts');
 const { reduce, initialState, describeError } = loadSource('src/context/steam-chat.tsx');
 const { ConversationScreen } = loadSource('src/components/chat/conversation-screen.tsx');
+const { ChatRow } = loadSource('src/components/chats/chat-row.tsx');
 const { FriendRow } = loadSource('src/components/friends/friend-row.tsx');
 const self = '76561197960265729';
 const friend = '76561197960265730';
@@ -440,6 +441,41 @@ test('an in-game friend row shows the game icon, game name and rich presence', (
   assert.match(html, /Delta Force/);
   assert.match(html, />Online</);
   assert.match(html, /community_assets\/images\/apps\/2507950\/abc123\.jpg/);
+});
+
+test('the chat list and conversation header surface an in-game friend’s game', () => {
+  const player = {
+    steamId: friend,
+    accountId: 1,
+    name: 'Player',
+    avatarUrl: 'https://example.com/avatar.jpg',
+    status: 'online',
+    gameAppId: 2507950,
+    richPresence: 'Online',
+    onSteamDeck: false,
+    relationship: 3,
+  };
+  const game = {
+    appId: 2507950,
+    name: 'Delta Force',
+    iconUrl: communityIconUrl(2507950, 'abc123'),
+  };
+
+  const row = renderToStaticMarkup(React.createElement(ChatRow, {
+    friend: player,
+    game,
+    preview: { text: 'hello', sentAt: Date.now(), mine: false },
+    unread: 0,
+    onPress: () => {},
+  }));
+  assert.match(row, /aria-label="Player\. Playing Delta Force, Online\. hello\./);
+  assert.match(row, /Delta Force/);
+  assert.match(row, /community_assets\/images\/apps\/2507950\/abc123\.jpg/);
+
+  const header = renderConversation({ friend: player, game });
+  assert.match(header, /Delta Force/);
+  assert.match(header, />Online</);
+  assert.match(header, /community_assets\/images\/apps\/2507950\/abc123\.jpg/);
 });
 
 const { decodeEmoticonList, parseMessageContent } = loadSource('src/lib/steam/chat-media.ts');
